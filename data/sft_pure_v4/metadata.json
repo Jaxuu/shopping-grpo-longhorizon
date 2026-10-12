@@ -1,8 +1,8 @@
 {
   "schema_version": "shopping-pure-v4-sft-v1",
   "teacher_model": "deepseek-v4-flash",
-  "rows": 1192,
-  "unique_task_ids": 1192,
+  "rows": 1152,
+  "unique_task_ids": 1152,
   "held_out_evaluation_overlap": 0,
   "merge": {
     "seed": 20260810,
@@ -23,12 +23,19 @@
   },
   "difficulty_labeling": {
     "model": "deepseek-v4-flash",
-    "simple": 284,
-    "medium": 798,
-    "hard": 110,
+    "simple": 279,
+    "medium": 767,
+    "hard": 106,
     "full_trajectory_rows": 1186,
     "compact_tool_content_rows": 6,
-    "compact_tool_content_task_ids": [983, 10574, 10646, 14803, 18595, 20915],
+    "compact_tool_content_task_ids": [
+      983,
+      10574,
+      10646,
+      14803,
+      18595,
+      20915
+    ],
     "mean_confidence": 0.894,
     "confidence_below_0_8": 4
   },
@@ -43,8 +50,61 @@
     }
   },
   "sha256": {
-    "all.jsonl": "7b70db7174daf7660209800441c06b2502d602969881b524ff0d2a3be5fb981e",
-    "difficulty_labels.jsonl": "50da1b9014e876848d5b5b8dcbf221ef8e981f1d32de28ded6b9492fcc70b894",
+    "all.jsonl": "8fc5a55c536213a154a1d2e2047e13adbb2d8b38597b636e936b0fa7d4dea975",
+    "difficulty_labels.jsonl": "b20c687f4c0f623f973e27d4abfe30050254818835db7a8e717cac532249b5a7",
     "duplicate_report.json": "f4947f659708b03291939dc8a0f67d086cfca2753a6e8461a3fd1de23d4727ca"
+  },
+  "admission": {
+    "contract": "shopping-task-admission-v1",
+    "applied": true,
+    "rejected": [
+      1135,
+      1769,
+      2304,
+      2616,
+      3321,
+      6394,
+      7398,
+      7682,
+      7930,
+      8993,
+      9168,
+      9670,
+      11298,
+      12298,
+      12380,
+      13089,
+      13144,
+      13724,
+      14300,
+      14953,
+      15480,
+      15668,
+      15743,
+      16060,
+      16795,
+      16834,
+      17016,
+      17219,
+      17337,
+      17853,
+      18083,
+      18442,
+      18939,
+      19118,
+      19448,
+      20031,
+      20558,
+      22858,
+      23387,
+      23419
+    ],
+    "reasons": {
+      "A2_price_unverifiable": 7,
+      "A3_zero_price": 6,
+      "A4_gold_cannot_win": 21,
+      "A6_cross_pool_overlap": 6
+    },
+    "method": "filter (original selection order preserved; no re-sampling)"
   }
 }

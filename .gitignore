@@ -21,3 +21,6 @@ models/
 swanlog/
 wandb/
 logs/
+
+plans/
+.workbuddy-ai

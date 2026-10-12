@@ -1,0 +1,9 @@
+# Byte-stable data artifacts.
+#
+# Several datasets carry recorded SHA-256 digests in their metadata.json. Those
+# digests are computed over LF bytes, so the working tree must not be converted
+# to CRLF on checkout (core.autocrlf=true would otherwise break the digest and
+# the reproducibility tests that verify it).
+data/**/*.jsonl text eol=lf
+data/**/*.json text eol=lf
+data/**/*.parquet -text

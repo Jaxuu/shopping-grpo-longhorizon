@@ -1,0 +1,59 @@
+{
+  "buckets": [
+    "1-5",
+    "6-10",
+    "11-20",
+    "21-35"
+  ],
+  "datasets": {
+    "evaluation": {
+      "comparable_to_rollout_steps": false,
+      "counts": {
+        "1-5": 197,
+        "11-20": 0,
+        "21-35": 0,
+        "6-10": 3
+      },
+      "note": "无 gold 轨迹，仅为结构性下界（search+open+select+buy），不可与 rollout 步数比较",
+      "step_source": "structural_lower_bound",
+      "total": 200
+    },
+    "grpo_train": {
+      "comparable_to_rollout_steps": false,
+      "counts": {
+        "1-5": 978,
+        "11-20": 0,
+        "21-35": 0,
+        "6-10": 22
+      },
+      "note": "无 gold 轨迹，仅为结构性下界（search+open+select+buy），不可与 rollout 步数比较",
+      "step_source": "structural_lower_bound",
+      "total": 1000
+    },
+    "grpo_validation": {
+      "comparable_to_rollout_steps": false,
+      "counts": {
+        "1-5": 49,
+        "11-20": 0,
+        "21-35": 0,
+        "6-10": 1
+      },
+      "note": "无 gold 轨迹，仅为结构性下界（search+open+select+buy），不可与 rollout 步数比较",
+      "step_source": "structural_lower_bound",
+      "total": 50
+    },
+    "sft_pure_v4": {
+      "comparable_to_rollout_steps": true,
+      "counts": {
+        "1-5": 154,
+        "11-20": 93,
+        "21-35": 18,
+        "6-10": 927
+      },
+      "note": "gold 轨迹步数（assistant 工具轮次），可与 rollout 步数直接比较",
+      "step_source": "gold_trajectory",
+      "total": 1192
+    }
+  },
+  "schema_version": "shopping-audit-difficulty-v1"
+}
