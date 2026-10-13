@@ -151,11 +151,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-batch-chars", type=int, default=60000)
     parser.add_argument("--max-tool-content-chars", type=int)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--backfill-input-mode",
+        action="store_true",
+        help=(
+            "Fill a missing label_input_mode on existing rows and exit. Idempotent "
+            "schema normalisation for label files written before the field existed."
+        ),
+    )
     return parser.parse_args()
+
+
+def backfill_input_mode(path: Path, mode: str) -> dict:
+    rows = read_jsonl(path) if path.exists() else []
+    filled = 0
+    for row in rows:
+        if "label_input_mode" not in row:
+            row["label_input_mode"] = mode
+            filled += 1
+    path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return {"rows": len(rows), "filled": filled, "label_input_mode": mode}
 
 
 def main() -> int:
     args = parse_args()
+    if args.backfill_input_mode:
+        mode = (
+            "compact_tool_content" if args.max_tool_content_chars else "full_trajectory"
+        )
+        print(json.dumps(backfill_input_mode(args.output, mode), ensure_ascii=False))
+        return 0
     rows = read_jsonl(args.input)
     if args.limit is not None:
         rows = rows[: args.limit]
@@ -194,6 +226,16 @@ def main() -> int:
                     )
                     continue
                 for label in sorted(labels, key=lambda item: item["task_id"]):
+                    # Record how the trajectory was presented to the teacher, so the
+                    # label file stays schema-uniform across collection batches.
+                    label = {
+                        **label,
+                        "label_input_mode": (
+                            "compact_tool_content"
+                            if args.max_tool_content_chars
+                            else "full_trajectory"
+                        ),
+                    }
                     text = json.dumps(
                         label, ensure_ascii=False, separators=(",", ":")
                     )

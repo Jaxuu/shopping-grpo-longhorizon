@@ -232,6 +232,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=20260814)
     parser.add_argument("--validation-ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--admission-contract",
+        default=None,
+        help="Stamp manifest.admission with this contract version (M4 rebuild keeps it).",
+    )
     return parser.parse_args()
 
 
@@ -260,6 +265,11 @@ def main() -> int:
         "path": _portable_path(args.evaluation, root),
         "sha256": _sha256(args.evaluation),
     }
+    if args.admission_contract:
+        manifest["admission"] = {
+            "contract": args.admission_contract,
+            "applied": True,
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

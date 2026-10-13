@@ -1,6 +1,9 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from scripts.label_sft_difficulty import make_batches
+from scripts.label_sft_difficulty import backfill_input_mode, make_batches
 from scripts.merge_sft_pure_v4 import _candidate_key
 
 
@@ -50,6 +53,36 @@ class SftDataCurationTests(unittest.TestCase):
             if message["role"] == "tool"
         ]
         self.assertTrue(all("truncated" in message["content"] for message in tool_messages))
+
+    def test_backfill_input_mode_is_additive_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "labels.jsonl"
+            path.write_text(
+                json.dumps({"task_id": 1, "difficulty": "hard"}, ensure_ascii=False)
+                + "\n"
+                + json.dumps(
+                    {
+                        "task_id": 2,
+                        "difficulty": "simple",
+                        "label_input_mode": "compact_tool_content",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = backfill_input_mode(path, "full_trajectory")
+            self.assertEqual(
+                result,
+                {"rows": 2, "filled": 1, "label_input_mode": "full_trajectory"},
+            )
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["label_input_mode"], "full_trajectory")
+            self.assertEqual(rows[1]["label_input_mode"], "compact_tool_content")
+
+            again = backfill_input_mode(path, "full_trajectory")
+            self.assertEqual(again["filled"], 0)
 
 
 if __name__ == "__main__":
