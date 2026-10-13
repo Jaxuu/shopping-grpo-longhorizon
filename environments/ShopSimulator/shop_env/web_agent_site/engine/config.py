@@ -14,7 +14,11 @@ from web_agent_site.engine.reward_features import (
     OPTION_AXIS_VERSION,
 )
 from web_agent_site.engine.observation import OBSERVATION_VERSION
-from web_agent_site.engine.reward import DEFAULT_REWARDS, REWARD_VERSION
+from web_agent_site.engine.reward import (
+    DEFAULT_REWARDS,
+    REWARD_VERSION,
+    SUPPORTED_REWARD_VERSIONS,
+)
 from web_agent_site.engine.search import DEFAULT_FIELD_WEIGHTS, SEARCH_VERSION
 from web_agent_site.engine.termination import TERMINATION_VERSION
 from web_agent_site.engine.variant_price import VARIANT_PRICE_VERSION
@@ -66,8 +70,14 @@ def validate_config(config):
             "Environment v2.1 search field weights differ from the index contract"
         )
     reward = config.get("reward")
-    if not isinstance(reward, dict) or reward.get("version") != REWARD_VERSION:
-        raise ValueError("Environment v2.1 config has the wrong reward version")
+    if (
+        not isinstance(reward, dict)
+        or reward.get("version") not in SUPPORTED_REWARD_VERSIONS
+    ):
+        raise ValueError(
+            "Environment v2.1 config reward version must be one of "
+            + ", ".join(SUPPORTED_REWARD_VERSIONS)
+        )
     reward_values = {
         key: float(reward.get(key)) for key in DEFAULT_REWARDS if key in reward
     }

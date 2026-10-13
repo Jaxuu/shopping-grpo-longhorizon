@@ -290,6 +290,28 @@ def explicit_budget_from_instruction(instruction):
     return None
 
 
+def explicit_price_preference_from_instruction(instruction):
+    """Extract the *nominal* value of a soft "左右/上下" price preference.
+
+    Reward v4 informational layer only. The hard budget gate keeps consuming
+    ``explicit_budget_from_instruction`` (v3-frozen +10% tolerance); this
+    helper additionally recovers the round-number the user actually said
+    ("价格控制在450元左右" → 450) so the proximity score can be reported in
+    the reward evidence. Returns ``None`` when no soft preference exists.
+    """
+    text = _normalize_price_text(instruction)
+    if not text:
+        return None
+    for pattern in (_AROUND_RE, _AROUND_BEFORE_UNIT_RE):
+        for match in pattern.finditer(text):
+            if not _price_context(text, match.start(), match.end()):
+                continue
+            value = _amount_value(match.group(1), match.group(2))
+            if value is not None and value > 0:
+                return value
+    return None
+
+
 def _price_range_above(price):
     if price <= 100:
         step = 3

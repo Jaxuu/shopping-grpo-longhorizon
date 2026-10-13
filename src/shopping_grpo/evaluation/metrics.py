@@ -19,6 +19,9 @@ from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE
 
 DETERMINISTIC_METRICS_VERSION = "shopping-deterministic-metrics-v1"
 REWARD_V3 = "shopsimulator-reward-v3"
+REWARD_V4 = "shopsimulator-reward-v4"
+# 双层口径（M7-5 依赖）：历史 v3 轨迹与 v4 轨迹都参与判定，报告层负责分表。
+SUPPORTED_REWARD_VERSIONS = (REWARD_V3, REWARD_V4)
 _ASIN = re.compile(rf"(?<!\d){PRODUCT_ID_CAPTURE}(?!\d)")
 _INFRASTRUCTURE_ERROR_TYPES = {
     "ContextBudgetError",
@@ -89,7 +92,7 @@ def _strict_success(normalized: Mapping, reward_detail: Mapping) -> bool:
     terminal = normalized.get("terminal")
     terminal = terminal if isinstance(terminal, Mapping) else {}
     return (
-        reward_detail.get("reward_version") == REWARD_V3
+        reward_detail.get("reward_version") in SUPPORTED_REWARD_VERSIONS
         and normalized.get("status") == "done"
         and normalized.get("done") is True
         and terminal.get("done") is True
@@ -219,10 +222,11 @@ def compute_deterministic_metrics(normalized: object) -> dict:
             contract_issues.append("done_status_without_terminal_over")
         if not reward_detail:
             contract_issues.append("done_status_without_reward_detail")
-    if reward_detail and reward_detail.get("reward_version") not in {
-        None,
-        REWARD_V3,
-    }:
+    if (
+        reward_detail
+        and reward_detail.get("reward_version")
+        not in {None, *SUPPORTED_REWARD_VERSIONS}
+    ):
         contract_issues.append("unexpected_reward_version")
     normalization = normalized.get("normalization")
     if isinstance(normalization, Mapping) and normalization.get("warnings"):

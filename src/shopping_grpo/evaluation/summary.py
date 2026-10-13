@@ -4,6 +4,11 @@ from collections import Counter
 
 
 REWARD_V3 = "shopsimulator-reward-v3"
+REWARD_V4 = "shopsimulator-reward-v4"
+# 双层口径：v3（历史可比）与 v4（改进口径）都被判定为有效 Reward；
+# 报告层（M7-5）负责把两者分表呈现，本模块只做接受性判定。
+SUPPORTED_REWARD_VERSIONS = (REWARD_V3, REWARD_V4)
+REWARD_CONTRACT = "+".join(SUPPORTED_REWARD_VERSIONS)
 REWARD_V3_TYPES = (
     "gold_purchase",
     "valid_alternative_purchase",
@@ -42,12 +47,12 @@ def summarize_trajectories(expected_task_ids, trajectories):
         detail.get("purchase_success") is True for detail in reward_details
     )
     gold_purchases = sum(
-        detail.get("reward_version") == REWARD_V3
+        detail.get("reward_version") in SUPPORTED_REWARD_VERSIONS
         and detail.get("reward_type") == "gold_purchase"
         for detail in reward_details
     )
     reward_valid_tasks = sum(
-        detail.get("reward_version") == REWARD_V3
+        detail.get("reward_version") in SUPPORTED_REWARD_VERSIONS
         and detail.get("reward_valid") is True
         for detail in reward_details
     )
@@ -108,7 +113,7 @@ def summarize_trajectories(expected_task_ids, trajectories):
         "strict_successes": len(strict_successes),
         "strict_success_task_ids": sorted(strict_successes),
         "strict_success_rate": len(strict_successes) / denominator if denominator else 0.0,
-        "reward_contract": REWARD_V3,
+        "reward_contract": REWARD_CONTRACT,
         "reward_version_counts": dict(sorted(reward_version_counts.items())),
         "reward_type_counts": dict(sorted(reward_type_counts.items())),
         "reward_type_rates": {
@@ -213,7 +218,7 @@ def _is_strict_success(trajectory):
     terminal = trajectory.get("terminal_result") or {}
     detail = _reward_detail(trajectory)
     return (
-        detail.get("reward_version") == REWARD_V3
+        detail.get("reward_version") in SUPPORTED_REWARD_VERSIONS
         and trajectory.get("status") == "done"
         and trajectory.get("done") is True
         and terminal.get("done") is True

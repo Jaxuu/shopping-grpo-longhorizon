@@ -18,6 +18,8 @@ from shopping_grpo.evaluation.contracts import (
 TASK_FACTS_VERSION = "shopping-task-facts-v1"
 RUBRIC_CANDIDATE_VERSION = "shopping-rubric-candidates-v1"
 RUBRIC_EXTRACTOR_VERSION = "shopping-rubric-extractor-v3"
+# M3-7：过程证据快照版本（不改终局奖励，仅供评测/训练侧消费，为 M6 铺路）。
+PROCESS_EVIDENCE_VERSION = "shopping-process-evidence-v1"
 
 _NUMBER = r"(\d+(?:\.\d+)?)\s*(万|千|[kK])?"
 _UPPER_PREFIX = re.compile(
@@ -258,6 +260,29 @@ def extract_price_candidates(query: str) -> list[dict]:
     )
 
 
+def extract_soft_price_preference(query: str) -> dict:
+    """Recover the nominal value of a soft "左右/上下" price preference.
+
+    Reward v4 informational layer ("改标准"): the hard budget keeps the
+    frozen +10% tolerance; this snapshot additionally carries the round
+    number the user said so downstream scoring can compute a proximity
+    metric without re-parsing the query.
+    """
+    value = None
+    for match in _AROUND.finditer(str(query or "")):
+        value = _scaled(match.group(1), match.group(2))
+        if value > 0:
+            break
+        value = None
+    return {
+        "version": PROCESS_EVIDENCE_VERSION,
+        "soft_price_preference": {
+            "active": value is not None,
+            "nominal": value,
+        },
+    }
+
+
 def build_task_facts(
     *,
     task_id: int,
@@ -313,6 +338,9 @@ def build_task_facts(
         "instruction": instruction_view,
         "target_product": target,
         "reward_features": reward_features,
+        "process_evidence": extract_soft_price_preference(
+            instruction_view["instruction"]
+        ),
     }
     payload["task_data_hash"] = stable_hash(payload)
     payload["query_hash"] = stable_hash(payload["query"])

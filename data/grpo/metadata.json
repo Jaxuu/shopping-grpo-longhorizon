@@ -124,5 +124,17 @@
       19430
     ],
     "method": "filter (original selection order preserved; no re-sampling)"
+  },
+  "reward_v4": {
+    "reward_version": "shopsimulator-reward-v4",
+    "supported_reward_versions": [
+      "shopsimulator-reward-v3",
+      "shopsimulator-reward-v4"
+    ],
+    "budget_parser": "shopping-budget-parser-v4",
+    "reward_py_sha256": "8e5df9c688f0ba3546a28d0a0deeec9cc4fd801567ce7ff855e8f65f588408f1",
+    "process_evidence_version": "shopping-process-evidence-v1",
+    "upgraded_at": "2026-10-13",
+    "note": "M3/R11：池判定仍以 admission 块（v3 时代 verdicts）为准；Reward 运行时已升至 v4，双层口径接受 v3+v4。"
   }
 }

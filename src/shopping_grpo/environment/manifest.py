@@ -9,6 +9,10 @@ from pathlib import Path
 
 MANIFEST_VERSION = "shopping-environment-manifest-v1"
 EMBEDDED_SOURCE_FILE = "EMBEDDED_SOURCE.json"
+SUPPORTED_REWARD_VERSIONS = (
+    "shopsimulator-reward-v3",
+    "shopsimulator-reward-v4",
+)
 REQUIRED_KEYS = {
     "manifest_version",
     "shopsimulator_commit",
@@ -69,9 +73,10 @@ def validate_manifest(manifest):
     )
     if environment_version != "shopsimulator-environment-v2.1":
         raise ValueError("manifest has an unsupported environment_version")
-    if manifest["reward"].get("version") != "shopsimulator-reward-v3":
+    if manifest["reward"].get("version") not in SUPPORTED_REWARD_VERSIONS:
         raise ValueError(
-            "shopsimulator-environment-v2.1 requires shopsimulator-reward-v3"
+            "shopsimulator-environment-v2.1 requires reward version one of: "
+            + ", ".join(SUPPORTED_REWARD_VERSIONS)
         )
     if manifest["search"].get("version") != "shopsimulator-multifield-bm25-v2":
         raise ValueError("manifest does not select multi-field BM25 v2")

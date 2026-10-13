@@ -48,7 +48,7 @@ class BenchmarkTest(unittest.TestCase):
         self.assertAlmostEqual(summary["strict_success_rate"], 1 / 3)
         self.assertEqual(summary["gold_purchases"], 1)
         self.assertAlmostEqual(summary["gold_purchase_rate"], 1 / 3)
-        self.assertEqual(summary["reward_contract"], "shopsimulator-reward-v3")
+        self.assertEqual(summary["reward_contract"], "shopsimulator-reward-v3+shopsimulator-reward-v4")
         self.assertEqual(summary["reward_type_counts"]["wrong_purchase"], 1)
         self.assertAlmostEqual(summary["mean_final_reward"], (1.0 - 0.85) / 2)
         self.assertEqual(summary["missing_tasks"], [12])

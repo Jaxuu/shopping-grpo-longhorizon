@@ -54,7 +54,12 @@ def acceptance_reasons(trajectory: dict) -> tuple[bool, list[str]]:
     ):
         reasons.append("missing_buy")
 
-    if reward.get("reward_version") != "shopsimulator-reward-v3":
+    # 双层口径：历史 v3 轨迹与新 v4 轨迹都可采集；reject 标识符沿用历史
+    # 字符串（"reward_v3_*"），以免破坏既有聚合与测试断言。
+    if (
+        reward.get("reward_version")
+        not in {"shopsimulator-reward-v3", "shopsimulator-reward-v4"}
+    ):
         reasons.append("reward_v3_required")
     if reward.get("reward_type") != "gold_purchase":
         reasons.append("reward_v3_not_gold_purchase")

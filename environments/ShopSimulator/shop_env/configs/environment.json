@@ -15,7 +15,7 @@
     }
   },
   "reward": {
-    "version": "shopsimulator-reward-v3",
+    "version": "shopsimulator-reward-v4",
     "gold_purchase": 1.0,
     "valid_alternative_purchase": 0.55,
     "partial_purchase_base": -0.3,

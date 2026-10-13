@@ -1,4 +1,4 @@
-"""Lightweight, consumer-oriented terminal Reward v3."""
+"""Lightweight, consumer-oriented terminal Reward."""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ from web_agent_site.engine.comparators import (
     load_brand_aliases,
     normalize_text,
 )
+from web_agent_site.engine.constraints import (
+    explicit_price_preference_from_instruction,
+)
 from web_agent_site.engine.reward_features import (
     REWARD_FEATURE_VERSION,
     normalize_option_text,
@@ -29,7 +32,16 @@ from web_agent_site.engine.variant_price import (
 )
 
 
-REWARD_VERSION = "shopsimulator-reward-v3"
+# Reward v4 = parser coverage (shopping-budget-parser-v4) + informational
+# layers (soft price proximity, process evidence). The hard-gate semantics
+# (``category`` + ``budget``, strict ``actual <= upper``) are byte-for-byte
+# the v3 semantics; see docs/reward-v4.md for the 修 bug / 改标准 split.
+REWARD_VERSION = "shopsimulator-reward-v4"
+SUPPORTED_REWARD_VERSIONS = (
+    "shopsimulator-reward-v3",
+    "shopsimulator-reward-v4",
+)
+PROCESS_EVIDENCE_VERSION = "shopping-process-evidence-v1"
 DIMENSION_WEIGHTS = {
     "brand": 0.35,
     "model": 0.25,
@@ -311,6 +323,69 @@ def _preference_dimensions(
     }
 
 
+def _soft_price_preference(goal: dict, price_resolution: object) -> dict:
+    """Reward v4 informational layer ("改标准", evidence-only).
+
+    Scores how close the paid price is to the *nominal* value of a soft
+    "左右/上下" preference. It never feeds the hard gates, the preference
+    match score, or the terminal reward; training and reporting layers may
+    consume it (M6/M7).
+    """
+    nominal = explicit_price_preference_from_instruction(
+        goal.get("instruction_text")
+    )
+    inactive = {
+        "active": False,
+        "nominal": None,
+        "actual": None,
+        "proximity": None,
+    }
+    if nominal is None or not isinstance(price_resolution, dict):
+        return inactive
+    if price_resolution.get("status") != PASS:
+        return inactive
+    try:
+        actual = float(price_resolution["price"])
+    except (KeyError, TypeError, ValueError):
+        return inactive
+    if not math.isfinite(actual) or actual < 0 or nominal <= 0:
+        return inactive
+    proximity = max(0.0, 1.0 - abs(actual - nominal) / nominal)
+    return {
+        "active": True,
+        "nominal": float(nominal),
+        "actual": actual,
+        "proximity": proximity,
+    }
+
+
+def _process_evidence(
+    hard_gates: dict,
+    preferences: dict,
+    soft_price: dict,
+    asin_match: bool,
+) -> dict:
+    """Compact terminal diagnostics for the training side (M3-7, M6 consumer).
+
+    Additive output only: the terminal reward, reward_type classification and
+    hard-gate semantics are identical to v3 (P1).
+    """
+    return {
+        "version": PROCESS_EVIDENCE_VERSION,
+        "hard_gates": {
+            name: gate["status"] for name, gate in hard_gates.items()
+        },
+        "match_score": float(preferences["match_score"]),
+        "evidence_coverage": float(preferences["evidence_coverage"]),
+        "dimension_scores": {
+            name: float(result.get("score", 0.0))
+            for name, result in preferences["dimensions"].items()
+        },
+        "soft_price_preference": dict(soft_price),
+        "target_asin_match": bool(asin_match),
+    }
+
+
 def _evaluate(
     product: dict,
     goal: dict,
@@ -374,6 +449,13 @@ def evaluate_purchase(
         price_resolution=price_resolution,
     )
     asin_match = str(product.get("asin")) == str(goal.get("asin"))
+    soft_price = _soft_price_preference(goal, price_resolution)
+    process_evidence = _process_evidence(
+        hard_gates,
+        preferences,
+        soft_price,
+        asin_match,
+    )
     hard_unverifiable = any(
         gate["status"] == UNVERIFIABLE for gate in hard_gates.values()
     )
@@ -418,6 +500,8 @@ def evaluate_purchase(
             "variant_price_version": VARIANT_PRICE_VERSION,
             "price_resolution": price_resolution,
             "preference_scoring": preferences,
+            "soft_price_preference": soft_price,
+            "process_evidence": process_evidence,
         },
     )
 

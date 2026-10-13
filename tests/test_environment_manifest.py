@@ -51,8 +51,29 @@ class EnvironmentManifestTest(unittest.TestCase):
         }
         self.assertIs(validate_manifest(manifest), manifest)
         manifest["reward"] = {"version": "unsupported-reward"}
-        with self.assertRaisesRegex(ValueError, "requires shopsimulator-reward-v3"):
+        with self.assertRaisesRegex(
+            ValueError, "requires reward version one of"
+        ):
             validate_manifest(manifest)
+
+    def test_manifest_accepts_reward_v3_and_v4(self):
+        base = {
+            "manifest_version": MANIFEST_VERSION,
+            "environment_version": "shopsimulator-environment-v2.1",
+            "shopsimulator_commit": "a" * 40,
+            "product_data_sha256": "c" * 64,
+            "search": {
+                "version": "shopsimulator-multifield-bm25-v2",
+                "page_size": 20,
+            },
+            "observation_version": "shopping-observation-v2",
+            "tool_version": "shopping-tools-v2",
+            "max_steps": 35,
+            "seed": 20260726,
+        }
+        for version in ("shopsimulator-reward-v3", "shopsimulator-reward-v4"):
+            manifest = dict(base, reward={"version": version})
+            self.assertIs(validate_manifest(manifest), manifest)
 
     def test_wrong_tool_contract_is_rejected(self):
         manifest = {

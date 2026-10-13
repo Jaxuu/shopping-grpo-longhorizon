@@ -11,6 +11,11 @@ from collections.abc import Mapping
 
 current_environment: ContextVar = ContextVar("shopsimulator_environment", default=None)
 current_runtime_state: ContextVar = ContextVar("shopsimulator_runtime_state", default=None)
+# 双层口径（R11 闭合）：历史 v3 轨迹与新 v4 终局都被接受。
+SUPPORTED_REWARD_VERSIONS = (
+    "shopsimulator-reward-v3",
+    "shopsimulator-reward-v4",
+)
 REWARD_V3_TYPES = {
     "gold_purchase",
     "valid_alternative_purchase",
@@ -111,14 +116,15 @@ def record_action_attempt(state: dict, tool_name: str, parameters: dict, observa
 
 
 def validate_reward(raw_detail: object) -> dict:
-    """Validate and minimize public Environment v2.1 / Reward v3 diagnostics."""
+    """Validate and minimize public Environment v2.1 / Reward v3+v4 diagnostics."""
     if not isinstance(raw_detail, Mapping):
         raise ValueError("reward_detail must be an object")
-    if raw_detail.get("reward_version") != "shopsimulator-reward-v3":
+    reward_version = raw_detail.get("reward_version")
+    if reward_version not in SUPPORTED_REWARD_VERSIONS:
         raise ValueError("reward_detail has an unsupported reward_version")
     reward_type = str(raw_detail.get("reward_type", ""))
     if reward_type not in REWARD_V3_TYPES:
-        raise ValueError(f"unknown Reward v3 reward_type: {reward_type!r}")
+        raise ValueError(f"unknown Reward reward_type: {reward_type!r}")
     if raw_detail.get("termination_reason") != reward_type:
         raise ValueError("termination_reason must equal reward_type")
     reward_valid = raw_detail.get("reward_valid")
@@ -191,7 +197,7 @@ def validate_reward(raw_detail: object) -> dict:
             )
         dimension_scores[name] = score
     return {
-        "reward_version": "shopsimulator-reward-v3",
+        "reward_version": reward_version,
         "reward_type": reward_type,
         "reward_valid": reward_valid,
         "termination_reason": reward_type,
@@ -224,7 +230,7 @@ def reward_breakdown(state: dict) -> dict[str, float | bool]:
         invalid = True
         native = 0.0
 
-    if state.get("reward_version") == "shopsimulator-reward-v3":
+    if state.get("reward_version") in SUPPORTED_REWARD_VERSIONS:
         detail = state.get("reward_detail") or {}
         reward_valid = bool(state.get("reward_valid", True))
         invalid_reward = not reward_valid
