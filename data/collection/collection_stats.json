@@ -1,0 +1,10 @@
+{
+  "schema_version": "shopping-sft-collection-merged-v1",
+  "rows": 100,
+  "accepted": 100,
+  "unique_task_ids": 100,
+  "duplicate_task_ids": 0,
+  "held_out_excluded": 0,
+  "source": "merged accepted artifacts from M2 collection rounds",
+  "note": "This is the final merged accepted artifact, not one round's reject_stats.json."
+}
