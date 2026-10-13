@@ -6,17 +6,20 @@ every train/development `task_id`; and keeps the three stages reproducible.
 
 | Stage | Included buckets | Train | Development | Epoch | LR |
 |---|---|---:|---:|---:|---:|
-| A | foundation | 256 | 28 | 1 | `1e-4` |
-| B | foundation + constraints | 799 | 88 | 1 | `7e-5` |
-| C | all buckets | 1,073 | 119 | 1 | `5e-5` |
+| A | foundation | 256 | 29 | 1 | `1e-4` |
+| B | foundation + constraints | 797 | 89 | 1 | `7e-5` |
+| C | all buckets | 1,126 | 126 | 1 | `5e-5` |
+
+Bucket sizes (train / development): foundation **256 / 29**, constraints
+**541 / 60**, strategy **329 / 37**.
 
 ## Curriculum weighting audit
 
-The Pure V4 file itself does not contain a 100x duplicated task: it has 1,192
-rows and 1,192 unique task IDs. The merge audit removed 258 duplicate rows from
-258 duplicate task groups, and exact duplicate user prompts were not found in
-the resulting file. See `../sft_pure_v4/metadata.json` and
-`../sft_pure_v4/duplicate_report.json`.
+The Pure V4 file does not contain a 100x duplicated task: the pre-M4 pool had
+1,192 rows and 1,192 unique task IDs, and the merge audit removed 258 duplicate
+rows from 258 duplicate task groups. M4-8 then merged the 100 high-ambiguity M2
+trajectories, so `all.jsonl` now holds **1,252 rows / 1,252 unique task IDs**. See
+`../sft_pure_v4/metadata.json` and `../sft_pure_v4/duplicate_report.json`.
 
 The curriculum nevertheless creates implicit reweighting because each stage
 starts from the previous merged checkpoint and trains for one epoch:
@@ -24,12 +27,12 @@ starts from the previous merged checkpoint and trains for one epoch:
 | Bucket | Unique train rows | Stages | Effective exposures per task |
 |---|---:|---|---:|
 | foundation (all simple) | 256 | A, B, C | 3 |
-| constraints (all medium) | 543 | B, C | 2 |
-| strategy (174 medium, 100 hard) | 274 | C | 1 |
+| constraints (medium, no rewrite/compare) | 541 | B, C | 2 |
+| strategy (medium with flags + all hard) | 329 | C | 1 |
 
-This produces 2,128 effective row exposures rather than 1,073. The raw train
-mix is 23.9% simple / 66.8% medium / 9.3% hard; after cumulative exposure it is
-approximately 36.1% / 59.2% / 4.7%. With the stage learning rates, the nominal
+This produces **2,179 effective row exposures** rather than 1,126. The raw train
+mix is 22.7% simple / 66.3% medium / 10.9% hard; after cumulative exposure it is
+approximately 35.2% / 59.1% / 5.6%. With the stage learning rates, the nominal
 per-task LR exposure is `2.2e-4` for foundation, `1.2e-4` for constraints, and
 `5e-5` for strategy. This is not an exact optimizer weight because Adam state
 and changing checkpoints matter, but it is a real bias toward foundation and
@@ -42,10 +45,17 @@ or log per-task exposure counts before changing the curriculum. Do not fix this
 by blindly duplicating hard rows, since that would introduce the same synthetic
 reweighting problem in another form.
 
+> **M4 decision (R12)**: the hard share stays at 10.8% — pool-level resampling was
+> explicitly rejected because it barely moves the *training* exposure (5.6% → ~11%)
+> while requiring a 2.07x duplication of hard rows or discarding 52% of the
+> non-hard rows. If hard signal must be increased, change the **stage
+> configuration** (e.g. an extra strategy epoch), not the row counts. See
+> `plans/m4-rebuild-report.md` §6.
+
 Regenerate and audit the list after changing either source file:
 
 ```bash
-.venv/bin/python scripts/prepare_sft_curriculum.py
+.venv/bin/python scripts/prepare_sft_curriculum.py --admission-contract shopping-task-admission-v1
 git diff -- data/sft_curriculum/manifest.json
 ```
 

@@ -1,8 +1,8 @@
 {
   "schema_version": "shopping-pure-v4-sft-v1",
   "teacher_model": "deepseek-v4-flash",
-  "rows": 1152,
-  "unique_task_ids": 1152,
+  "rows": 1252,
+  "unique_task_ids": 1252,
   "held_out_evaluation_overlap": 0,
   "merge": {
     "seed": 20260810,
@@ -23,9 +23,9 @@
   },
   "difficulty_labeling": {
     "model": "deepseek-v4-flash",
-    "simple": 279,
-    "medium": 767,
-    "hard": 106,
+    "simple": 285,
+    "medium": 832,
+    "hard": 135,
     "full_trajectory_rows": 1186,
     "compact_tool_content_rows": 6,
     "compact_tool_content_task_ids": [
@@ -36,8 +36,14 @@
       18595,
       20915
     ],
-    "mean_confidence": 0.894,
-    "confidence_below_0_8": 4
+    "mean_confidence": 0.8896,
+    "confidence_below_0_8": 6,
+    "label_input_mode_histogram": {
+      "compact_tool_content": 6,
+      "full_trajectory": 1246
+    },
+    "m2_increment_relabelled": 100,
+    "label_source_note": "All labels come from the teacher model. The M2 increment rows were re-labelled in M4; label_input_mode is present on every row."
   },
   "requested_3_5_2_mix": {
     "status": "not_materialized",
@@ -50,9 +56,10 @@
     }
   },
   "sha256": {
-    "all.jsonl": "8fc5a55c536213a154a1d2e2047e13adbb2d8b38597b636e936b0fa7d4dea975",
-    "difficulty_labels.jsonl": "b20c687f4c0f623f973e27d4abfe30050254818835db7a8e717cac532249b5a7",
-    "duplicate_report.json": "f4947f659708b03291939dc8a0f67d086cfca2753a6e8461a3fd1de23d4727ca"
+    "all.jsonl": "97974d86dcf06979cbba719e3b670ecb1322b3e0634aab595898790531c15d52",
+    "difficulty_labels.jsonl": "57859f7eb81be98108049886f02a57688f6d608457177cf798f1bf0cdb32af24",
+    "duplicate_report.json": "f4947f659708b03291939dc8a0f67d086cfca2753a6e8461a3fd1de23d4727ca",
+    "all_toolonly.jsonl": "37242c574c04f6d21e2e7f5e95a59bfc206628246d01d45eb6f8d311453cf6bf"
   },
   "admission": {
     "contract": "shopping-task-admission-v1",
@@ -118,5 +125,92 @@
     "process_evidence_version": "shopping-process-evidence-v1",
     "upgraded_at": "2026-10-13",
     "note": "M3/R11：池判定仍以 admission 块为准；Reward 运行时已升至 v4，双层口径接受 v3+v4。"
+  },
+  "budget_parse_rate": 0.9377,
+  "budget_parser": "shopping-budget-parser-v4",
+  "collection": {
+    "source": "merged accepted artifacts from M2 collection rounds",
+    "accepted": 100,
+    "unique_task_ids": 100,
+    "merged_into_pool": 100,
+    "guard_repair": {
+      "repaired_rows": 41,
+      "removed_guard_pairs": 56,
+      "reason_histogram": {
+        "click_not_in_previous_observation": 37,
+        "invalid_tool_call:JSONDecodeError": 2,
+        "search_not_available_on_current_page": 15,
+        "unknown_or_invalid_tool": 2
+      },
+      "method": "delete (illegal assistant turn, rejection observation) pairs; every rejection observation states 未执行, so the environment state is unchanged"
+    },
+    "provenance_rounds": [
+      {
+        "round": 1,
+        "model": "deepseek-flash",
+        "temperature": 0.7,
+        "thinking": "enabled (unintended default)",
+        "outcome": "85% assistant_final; interrupted"
+      },
+      {
+        "round": 2,
+        "model": "deepseek-flash",
+        "temperature": 0.7,
+        "thinking": "enabled (unintended default)",
+        "outcome": "collected_raw=0 after purge"
+      },
+      {
+        "round": 3,
+        "model": "deepseek-flash",
+        "temperature": 0.7,
+        "thinking": "enabled (unintended default)",
+        "outcome": "0 net new (attempt_index not normalised)"
+      },
+      {
+        "round": 4,
+        "model": "deepseek-v4-flash",
+        "temperature": 0.0,
+        "thinking": "disabled",
+        "outcome": "53% acceptance; 100 unique tasks"
+      }
+    ],
+    "note": "Terminal-only acceptance (strict gold_purchase) passed all 100 rows; the guard-rejection repair is applied here, not in the collection pipeline."
+  },
+  "m4": {
+    "schema_version": "shopping-m4-increment-merge-v1",
+    "increment": {
+      "source": "data/collection/accepted.jsonl",
+      "repaired_output": "data/collection/accepted_repaired.jsonl",
+      "pool_before": 1152,
+      "pool_after": 1252,
+      "replaced_existing": 0
+    },
+    "variants": {
+      "d_full": "data/sft_pure_v4/all.jsonl",
+      "d_toolonly": "data/sft_pure_v4/all_toolonly.jsonl",
+      "report": "data/sft_pure_v4/variants_report.json"
+    }
+  },
+  "admission_recheck": {
+    "contract": "shopping-task-admission-v1",
+    "tasks": 1252,
+    "admitted": 1252,
+    "rejected": 0,
+    "reasons_histogram": {},
+    "warnings_histogram": {},
+    "note": "A1-A6 re-run on the merged pool; the 100 M2 rows all pass."
+  },
+  "split": {
+    "source_manifest": "data/sft_curriculum/manifest.json",
+    "split_seed": 20260814,
+    "validation_ratio": 0.1,
+    "train": 1126,
+    "validation": 126,
+    "buckets": {
+      "foundation": 285,
+      "constraints": 601,
+      "strategy": 366
+    },
+    "note": "Re-split after the M2 merge; supersedes the stale 84/9 interim counts."
   }
 }

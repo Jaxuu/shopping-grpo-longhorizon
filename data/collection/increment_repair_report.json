@@ -1,0 +1,326 @@
+{
+  "schema_version": "shopping-m4-increment-merge-v1",
+  "source_increment": "data/collection/accepted.jsonl",
+  "output_pool": "data/sft_pure_v4/all.jsonl",
+  "repaired_increment": "data/collection/accepted_repaired.jsonl",
+  "counts": {
+    "increment_rows": 100,
+    "repaired_rows": 41,
+    "removed_guard_pairs": 56,
+    "invalid_after_repair": 0,
+    "admitted_increment_rows": 100,
+    "pool_rows": 1152,
+    "replaced_existing": 0,
+    "merged_rows": 1252
+  },
+  "guard_reason_histogram": {
+    "click_not_in_previous_observation": 37,
+    "invalid_tool_call:JSONDecodeError": 2,
+    "search_not_available_on_current_page": 15,
+    "unknown_or_invalid_tool": 2
+  },
+  "guard_pairs_without_not_executed_marker": [],
+  "invalid_after_repair": [],
+  "repaired_detail": [
+    {
+      "task_id": 12787,
+      "removed_pairs": 2,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 12150,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 10315,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 21512,
+      "removed_pairs": 1,
+      "reasons": [
+        "unknown_or_invalid_tool"
+      ]
+    },
+    {
+      "task_id": 1053,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 3929,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "unknown_or_invalid_tool"
+      ]
+    },
+    {
+      "task_id": 19711,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 21932,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 18110,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 1689,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 17003,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 20462,
+      "removed_pairs": 4,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 10897,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 21465,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 15778,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 11182,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 21805,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 1058,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 10678,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 22178,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 19993,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 4140,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 21492,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 3043,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 10839,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 15399,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 17270,
+      "removed_pairs": 2,
+      "reasons": [
+        "invalid_tool_call:JSONDecodeError",
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 11506,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "invalid_tool_call:JSONDecodeError"
+      ]
+    },
+    {
+      "task_id": 15031,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 20227,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 15747,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 9578,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 7004,
+      "removed_pairs": 1,
+      "reasons": [
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 156,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 14583,
+      "removed_pairs": 2,
+      "reasons": [
+        "click_not_in_previous_observation",
+        "search_not_available_on_current_page"
+      ]
+    },
+    {
+      "task_id": 728,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 12827,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 16779,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 17179,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 236,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    },
+    {
+      "task_id": 11606,
+      "removed_pairs": 1,
+      "reasons": [
+        "click_not_in_previous_observation"
+      ]
+    }
+  ],
+  "sha256": {
+    "increment": "e2a1185dc2e3b3dde42eddd418a2e953ab1078864748347f892006eaaa79c96f",
+    "repaired_increment": "45d8c5edf94c742ade5be89ea705ee9aca09acbae04a5e017e8034b413846361",
+    "merged_pool": "97974d86dcf06979cbba719e3b670ecb1322b3e0634aab595898790531c15d52"
+  }
+}

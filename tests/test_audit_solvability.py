@@ -240,7 +240,9 @@ class CleanedPoolTests(unittest.TestCase):
             )
 
     def test_expected_pool_sizes(self):
-        self.assertEqual(len(self.ids["sft_pure_v4"]), 1152)
+        # SFT grew from 1,152 to 1,252 when the M2 increment (100 high-ambiguity
+        # trajectories) was merged in M4-8; GRPO pools are unchanged.
+        self.assertEqual(len(self.ids["sft_pure_v4"]), 1252)
         self.assertEqual(len(self.ids["grpo_train"]), 906)
         self.assertEqual(len(self.ids["grpo_validation"]), 49)
 
