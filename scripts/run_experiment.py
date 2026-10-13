@@ -24,6 +24,13 @@ TARGET_MODULE_PRESETS = {
         "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj",
     ),
 }
+# M5: the Pure V4 pool ships two loss-scope variants with identical rows/task ids.
+SFT_DATA_VARIANTS = {
+    "full": "data/sft_pure_v4/all.jsonl",
+    "toolonly": "data/sft_pure_v4/all_toolonly.jsonl",
+}
+SFT_LOSS_SCOPES = ("assistant", "tool-call-only")
+SFT_CURRICULUM_MANIFEST = "data/sft_curriculum/manifest.json"
 
 
 def load_registry(path: Path) -> dict:
@@ -85,6 +92,12 @@ def _validate_settings(stage: str, settings: dict) -> None:
         _positive(settings, "learning_rate", "epochs", "lora_rank", "lora_alpha", "subset_seed")
         if settings["target_modules"] not in TARGET_MODULE_PRESETS:
             raise ValueError(f"unknown target_modules preset: {settings['target_modules']!r}")
+        if settings.get("loss_scope") not in SFT_LOSS_SCOPES:
+            raise ValueError(f"unknown loss_scope: {settings.get('loss_scope')!r}")
+        if settings.get("data_variant") not in SFT_DATA_VARIANTS:
+            raise ValueError(f"unknown data_variant: {settings.get('data_variant')!r}")
+        if settings.get("curriculum_stage") not in {"a", "b", "c"}:
+            raise ValueError(f"unknown curriculum_stage: {settings.get('curriculum_stage')!r}")
         if settings["train_count"] is not None and settings["train_ratio"] is not None:
             raise ValueError("train_count and train_ratio are mutually exclusive")
         if settings["train_count"] is not None and int(settings["train_count"]) <= 0:
@@ -143,12 +156,15 @@ def build_experiment(
         else source_path
     )
     if experiment["stage"] == "sft":
+        default_data = root / SFT_DATA_VARIANTS[settings["data_variant"]]
         command = [
             _python(root),
             "scripts/train_lora_sft.py",
             "--model", str(model or "Qwen/Qwen3.5-2B"),
-            "--train", str(train_data or root / "data/sft/train.jsonl"),
-            "--validation", str(validation_data or root / "data/sft/validation.jsonl"),
+            "--train", str(train_data or default_data),
+            "--validation", str(validation_data or default_data),
+            "--curriculum-manifest", str(root / SFT_CURRICULUM_MANIFEST),
+            "--curriculum-stage", str(settings["curriculum_stage"]),
             "--output", str(output),
             "--learning-rate", str(settings["learning_rate"]),
             "--epochs", str(settings["epochs"]),
@@ -157,6 +173,8 @@ def build_experiment(
             "--target-modules", *TARGET_MODULE_PRESETS[settings["target_modules"]],
             "--subset-seed", str(settings["subset_seed"]),
             "--save-total-limit", str(settings["save_total_limit"]),
+            "--loss-scope", str(settings["loss_scope"]),
+            "--seed", str(settings["seed"]),
             "--dtype", "auto",
             "--gradient-checkpointing",
             "--attention-implementation", "sdpa",

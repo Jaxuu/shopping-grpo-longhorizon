@@ -13,6 +13,11 @@ from pathlib import Path
 
 IGNORE_INDEX = -100
 
+#: 允许的 loss 口径。``assistant`` 监督整个 assistant 回合（自然语言 content +
+#: tool calls）；``tool-call-only`` 只监督 tool call 载荷，排除 assistant 的自然
+#: 语言 content，用于 M5 的 SFT-B 臂。
+LOSS_SCOPES = ("assistant", "tool-call-only")
+
 
 def _token_ids(tokenizer, text):
     """兼容 Hugging Face tokenizer 与测试用的最小 tokenizer。"""
@@ -23,6 +28,16 @@ def _common_prefix_length(left, right):
     """返回两个 token 序列的最长公共前缀长度。"""
     length = 0
     for left_token, right_token in zip(left, right):
+        if left_token != right_token:
+            break
+        length += 1
+    return length
+
+
+def _common_suffix_length(left, right):
+    """返回两个 token 序列的最长公共后缀长度。"""
+    length = 0
+    for left_token, right_token in zip(reversed(left), reversed(right)):
         if left_token != right_token:
             break
         length += 1
@@ -53,13 +68,62 @@ def normalize_messages_for_chat_template(messages):
     return normalized
 
 
-def build_supervised_example(messages, tools, tokenizer, max_length=8192, chat_template=None):
-    """渲染一条轨迹，并只保留 assistant 回合对应的训练标签。
+def _tool_call_span(
+    rendered_messages, index, template, tools, tokenizer, through_assistant_ids
+):
+    """定位 assistant 回合内 tool call 载荷对应的 token 区间。
+
+    做法与 assistant 边界一致，都交给目标 chat template：把该回合的 ``tool_calls``
+    清空后重新渲染，再与完整渲染取最长公共前缀与后缀，中间被插入的 token 就是
+    tool call 载荷。这样无需硬编码 Qwen 的 ``<tool_call>`` 分隔符，模板更换后仍然
+    成立。若去掉 tool calls 不是一次纯插入（前后缀之外仍有别的差异），返回 ``None``，
+    由调用方丢弃该样本，绝不产生错位的标签。
+    """
+    stripped = deepcopy(rendered_messages[: index + 1])
+    assistant_message = stripped[index]
+    if not assistant_message.get("tool_calls"):
+        return None
+    assistant_message["tool_calls"] = []
+    try:
+        stripped_text = template.apply_chat_template(
+            stripped,
+            tools=tools,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        stripped_ids = _token_ids(tokenizer, stripped_text)
+    except Exception:
+        return None
+    start = _common_prefix_length(stripped_ids, through_assistant_ids)
+    suffix = _common_suffix_length(stripped_ids, through_assistant_ids)
+    end = len(through_assistant_ids) - suffix
+    if start >= end:
+        return None
+    if through_assistant_ids[:start] + through_assistant_ids[end:] != stripped_ids:
+        return None
+    return start, end
+
+
+def build_supervised_example(
+    messages,
+    tools,
+    tokenizer,
+    max_length=8192,
+    chat_template=None,
+    loss_scope="assistant",
+):
+    """渲染一条轨迹，并按 ``loss_scope`` 只保留 assistant 回合对应的训练标签。
 
     每个 assistant 回合分别渲染「此前消息 + generation prompt」与「包含该回合的
     消息」，两者的 token 差即为该回合的可训练部分，其中自然包含 tool call。
     任何超长或模板边界不一致样本都会丢弃，不做可能截断工具调用的截断。
+
+    ``loss_scope="assistant"``（默认）监督整个 assistant 回合，即自然语言 content
+    与 tool calls 都参与 loss；``loss_scope="tool-call-only"`` 只监督 tool call
+    载荷，排除 assistant 的自然语言 content —— 后者是 M5 SFT-B 臂的口径。
     """
+    if loss_scope not in LOSS_SCOPES:
+        raise ValueError(f"loss_scope must be one of {LOSS_SCOPES}, got {loss_scope!r}")
     # 原始消息保持 OpenAI 格式；只在这里为目标 chat template 做训练期转换。
     template = chat_template or tokenizer
     rendered_messages = normalize_messages_for_chat_template(messages)
@@ -115,7 +179,26 @@ def build_supervised_example(messages, tools, tokenizer, max_length=8192, chat_t
             return None
         if input_ids[:end] != through_assistant_ids:
             return None
-        labels[start:end] = input_ids[start:end]
+
+        if loss_scope == "assistant":
+            span_start, span_end = start, end
+        else:
+            span = _tool_call_span(
+                rendered_messages,
+                index,
+                template,
+                tools,
+                tokenizer,
+                through_assistant_ids,
+            )
+            if span is None:
+                # 该回合没有 tool call（或模板差异无法安全定位）：tool-call-only
+                # 口径下这一回合没有监督信号，跳过即可。
+                continue
+            span_start, span_end = span
+            if not (start <= span_start < span_end <= end):
+                return None
+        labels[span_start:span_end] = input_ids[span_start:span_end]
 
     if not any(label != IGNORE_INDEX for label in labels):
         return None
@@ -132,6 +215,7 @@ def load_supervised_examples(
     max_length=8192,
     chat_template=None,
     task_ids=None,
+    loss_scope="assistant",
 ):
     """读取本仓库生成的 SFT JSONL，并报告被模板拒绝的样本数。"""
     try:
@@ -162,6 +246,7 @@ def load_supervised_examples(
                 tokenizer=tokenizer,
                 max_length=max_length,
                 chat_template=chat_template,
+                loss_scope=loss_scope,
             )
         except (KeyError, TypeError, json.JSONDecodeError):
             example = None

@@ -31,6 +31,8 @@ def build_stage_commands(
     qlora=False,
     liger_kernel=False,
     resume_from_checkpoint=None,
+    loss_scope="assistant",
+    max_steps=-1,
 ):
     start = STAGES.index(start_stage)
     stop = STAGES.index(stop_after_stage)
@@ -59,6 +61,8 @@ def build_stage_commands(
             str(manifest_path),
             "--curriculum-stage",
             stage,
+            "--loss-scope",
+            str(loss_scope),
             "--output",
             str(stage_root / "adapter"),
             "--epochs",
@@ -81,6 +85,8 @@ def build_stage_commands(
             train.append("--qlora")
         if liger_kernel:
             train.append("--liger-kernel")
+        if int(max_steps) > 0:
+            train.extend(["--max-steps", str(int(max_steps))])
         if index == 0 and resume_from_checkpoint:
             train.extend(["--resume-from-checkpoint", str(resume_from_checkpoint)])
         merge = [
@@ -112,11 +118,23 @@ def parse_args():
     )
     parser.add_argument("--start-stage", choices=STAGES, default="a")
     parser.add_argument("--stop-after-stage", choices=STAGES, default="c")
+    parser.add_argument(
+        "--loss-scope",
+        choices=("assistant", "tool-call-only"),
+        default="assistant",
+        help="M5 A/B 的 loss 口径；两个臂必须使用同一课程与同一口径之外的相同超参。",
+    )
     parser.add_argument("--resume-from-checkpoint", type=Path)
     parser.add_argument("--swanlab", action="store_true")
     parser.add_argument("--swanlab-project", default="shopping-grpo-sft-curriculum")
     parser.add_argument("--qlora", action="store_true")
     parser.add_argument("--liger-kernel", action="store_true")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=-1,
+        help="透传给每个阶段的 --max-steps；仅用于冒烟测试（-1=按 manifest 的 epochs 跑完整阶段）",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -144,6 +162,8 @@ def main():
             qlora=args.qlora,
             liger_kernel=args.liger_kernel,
             resume_from_checkpoint=args.resume_from_checkpoint,
+            loss_scope=args.loss_scope,
+            max_steps=args.max_steps,
         )
     except (KeyError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc

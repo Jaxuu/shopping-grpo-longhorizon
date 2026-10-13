@@ -32,6 +32,35 @@ class SftCurriculumTest(unittest.TestCase):
         self.assertTrue(commands[2]["merge"][commands[2]["merge"].index("--output") + 1].endswith("stage-c/merged"))
         self.assertIn("--curriculum-manifest", commands[0]["train"])
         self.assertIn("--gradient-checkpointing", commands[0]["train"])
+        self.assertEqual(
+            commands[0]["train"][commands[0]["train"].index("--loss-scope") + 1],
+            "assistant",
+        )
+
+    def test_loss_scope_is_threaded_to_every_stage(self):
+        """M5 的两臂通过同一课程、同一 loss 口径参数区分。"""
+        manifest = {
+            "stages": {
+                stage: {"epochs": 1.0, "learning_rate": 1e-4}
+                for stage in ("a", "b", "c")
+            }
+        }
+        commands = build_stage_commands(
+            manifest,
+            manifest_path=Path("manifest.json"),
+            source=Path("all.jsonl"),
+            base_model="base",
+            output_root=Path("outputs"),
+            python="python",
+            loss_scope="tool-call-only",
+        )
+
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertEqual(
+                command["train"][command["train"].index("--loss-scope") + 1],
+                "tool-call-only",
+            )
 
     def test_start_and_stop_select_a_contiguous_stage_range(self):
         manifest = {
@@ -67,6 +96,50 @@ class SftCurriculumTest(unittest.TestCase):
                 start_stage="c",
                 stop_after_stage="a",
             )
+
+
+    def test_max_steps_is_forwarded_to_every_stage_for_smoke_runs(self):
+        """冒烟测试要能在课程入口上限制步数（显存/耗时预检）。"""
+        manifest = {
+            "stages": {
+                stage: {"epochs": 1.0, "learning_rate": 1e-4}
+                for stage in ("a", "b", "c")
+            }
+        }
+        commands = build_stage_commands(
+            manifest,
+            manifest_path=Path("manifest.json"),
+            source=Path("all.jsonl"),
+            base_model="base",
+            output_root=Path("outputs"),
+            python="python",
+            max_steps=20,
+        )
+
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertEqual(
+                command["train"][command["train"].index("--max-steps") + 1], "20"
+            )
+
+    def test_default_curriculum_run_has_no_max_steps(self):
+        manifest = {
+            "stages": {
+                stage: {"epochs": 1.0, "learning_rate": 1e-4}
+                for stage in ("a", "b", "c")
+            }
+        }
+        commands = build_stage_commands(
+            manifest,
+            manifest_path=Path("manifest.json"),
+            source=Path("all.jsonl"),
+            base_model="base",
+            output_root=Path("outputs"),
+            python="python",
+        )
+
+        for command in commands:
+            self.assertNotIn("--max-steps", command["train"])
 
 
 if __name__ == "__main__":

@@ -14,6 +14,13 @@ MERGED_DIR="${SFT_MERGED_DIR:-$ROOT/outputs/models/sft-merged}"
 TRAIN_DATA="${SFT_TRAIN:-data/sft_pure_v4/all.jsonl}"
 CURRICULUM_MANIFEST="${SFT_CURRICULUM_MANIFEST:-data/sft_curriculum/manifest.json}"
 CURRICULUM_STAGE="${SFT_CURRICULUM_STAGE:-c}"
+# M5 A/B: SFT-A keeps the default assistant-turn loss; SFT-B sets
+# SFT_LOSS_SCOPE=tool-call-only to supervise the tool-call spans alone.
+# SFT_EPOCHS / SFT_LR are exposed so both arms can be pinned explicitly instead
+# of relying on the script defaults (they default to the historical SFT recipe).
+LOSS_SCOPE="${SFT_LOSS_SCOPE:-assistant}"
+EPOCHS="${SFT_EPOCHS:-3}"
+LR="${SFT_LR:-1e-4}"
 
 cd "$ROOT"
 "$ROOT/.venv/bin/python" scripts/train_lora_sft.py \
@@ -22,6 +29,9 @@ cd "$ROOT"
   --validation "$TRAIN_DATA" \
   --curriculum-manifest "$CURRICULUM_MANIFEST" \
   --curriculum-stage "$CURRICULUM_STAGE" \
+  --loss-scope "$LOSS_SCOPE" \
+  --epochs "$EPOCHS" \
+  --learning-rate "$LR" \
   --output "$ADAPTER_DIR" \
   --dtype auto \
   --gradient-checkpointing \

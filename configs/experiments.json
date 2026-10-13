@@ -10,7 +10,11 @@
       "train_count": null,
       "train_ratio": null,
       "subset_seed": 42,
-      "save_total_limit": 3
+      "save_total_limit": 3,
+      "loss_scope": "assistant",
+      "data_variant": "full",
+      "curriculum_stage": "c",
+      "seed": 42
     },
     "grpo": {
       "learning_rate": 0.000001,
@@ -35,6 +39,18 @@
     "sft_lr_5e-5": {"stage": "sft", "overrides": {"learning_rate": 0.00005}},
     "sft_lora_rank_8": {"stage": "sft", "overrides": {"lora_rank": 8}},
     "sft_target_attention_only": {"stage": "sft", "overrides": {"target_modules": "attention_only"}},
+    "sft_m5_a_full_assistant": {
+      "stage": "sft",
+      "overrides": {"loss_scope": "assistant", "data_variant": "full"}
+    },
+    "sft_m5_b_toolcall_only": {
+      "stage": "sft",
+      "overrides": {"loss_scope": "tool-call-only", "data_variant": "full"}
+    },
+    "sft_m5_b2_toolonly_data": {
+      "stage": "sft",
+      "overrides": {"loss_scope": "assistant", "data_variant": "toolonly"}
+    },
     "grpo_baseline": {"stage": "grpo", "overrides": {}},
     "grpo_trace": {"stage": "grpo", "overrides": {"trace_enabled": true}},
     "grpo_rollout_2": {"stage": "grpo", "overrides": {"rollout_number": 2}},

@@ -51,6 +51,16 @@ def parse_args():
     parser.add_argument("--output", type=Path, required=True, help="LoRA adapter 输出目录")
     # 24k 可保留当前真实轨迹的约 93%，48G 显存配合 batch=1 与梯度检查点可稳定训练。
     parser.add_argument("--max-length", type=int, default=24576)
+    parser.add_argument(
+        "--loss-scope",
+        choices=("assistant", "tool-call-only"),
+        default="assistant",
+        help=(
+            "SFT 的 loss 口径：assistant（默认，监督 assistant 的自然语言 content 与 "
+            "tool calls）或 tool-call-only（只监督 tool call 载荷，排除 assistant 的自然"
+            "语言 content）。M5 的 SFT-A / SFT-B 两臂只用该开关区分。"
+        ),
+    )
     parser.add_argument("--epochs", type=float, default=3)
     parser.add_argument("--per-device-train-batch-size", type=int, default=1)
     parser.add_argument("--per-device-eval-batch-size", type=int, default=1)
@@ -423,6 +433,7 @@ def main():
     # ---- Phase 1: 加载训练数据 ----
     print(f"\n{'='*60}")
     print(f"  Phase 1/3: 加载 & Tokenize 训练数据 (max_length={args.max_length})")
+    print(f"  loss_scope={args.loss_scope}")
     print(f"{'='*60}")
     train_examples, train_stats = load_supervised_examples(
         args.train,
@@ -430,6 +441,7 @@ def main():
         chat_template=chat_template,
         max_length=args.max_length,
         task_ids=train_task_ids,
+        loss_scope=args.loss_scope,
     )
     if train_task_ids is not None and train_stats["matched"] != len(train_task_ids):
         raise SystemExit("课程清单中的训练 task_id 未全部出现在 --train 数据中")
@@ -454,6 +466,7 @@ def main():
             chat_template=chat_template,
             max_length=args.max_length,
             task_ids=validation_task_ids,
+            loss_scope=args.loss_scope,
         )
         if validation_task_ids is not None and validation_stats["matched"] != len(
             validation_task_ids
