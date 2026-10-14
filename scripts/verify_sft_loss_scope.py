@@ -5,7 +5,10 @@
 ``shopping_grpo.training.sft.dataset.build_supervised_example``，对 Pure V4 池的
 若干行断言三件事：
 
-1. 两个口径都能为每一行产出可训练样本（不丢样本、不超长）；
+1. 两个口径都能为每一行产出可训练样本。**例外**：超过 ``--max-length`` 的行会被
+   ``build_supervised_example`` 有意丢弃（不做可能截断工具调用的截断），这与训练行为一致。
+   脚本会用放宽后的 ``max_length`` 复检一次来区分「超长丢弃」（计入 ``over_long_drops``，
+   **不算失败**）与「真缺陷」（计入 ``failures``，判失败）；
 2. ``tool-call-only`` 仍完整保留 tool call（函数名逐个出现在被监督的 token 里）；
 3. 对有自然语言 content 的行，``tool-call-only`` **不**监督这些 content，且监督
    token 数严格少于 ``assistant`` 口径。
@@ -24,6 +27,8 @@ DEFAULT_FULL = ROOT / "data/sft_pure_v4/all.jsonl"
 DEFAULT_TOOLONLY = ROOT / "data/sft_pure_v4/all_toolonly.jsonl"
 DEFAULT_REPORT = ROOT / "plans/m5-loss-scope-preflight.json"
 SNIPPET_CHARS = 24
+#: 复检「超长丢弃」用的放宽上限；只用于判定丢弃原因，不参与真实训练。
+UNBOUNDED_MAX_LENGTH = 10_000_000
 
 
 def _load_template(model: str, revision: str | None = None):
@@ -95,6 +100,7 @@ def _check_file(path: Path, limit: int, tokenizer, template, max_length: int) ->
 
     rows = _read_rows(path, limit)
     failures: list[dict] = []
+    over_long_drops = 0
     total_assistant_tokens = 0
     total_toolonly_tokens = 0
     rows_with_content = 0
@@ -115,7 +121,22 @@ def _check_file(path: Path, limit: int, tokenizer, template, max_length: int) ->
                 loss_scope=scope,
             )
             if example is None:
-                failures.append({"task_id": task_id, "reason": f"{scope}: dropped"})
+                # 区分「超长丢弃」（by design：不做可能截断工具调用的截断，训练同样会丢）
+                # 与「真缺陷」。放宽 max_length 复检：能训成 → 超长；仍失败 → 真缺陷。
+                retry = build_supervised_example(
+                    messages=messages,
+                    tools=tools,
+                    tokenizer=tokenizer,
+                    max_length=UNBOUNDED_MAX_LENGTH,
+                    chat_template=template,
+                    loss_scope=scope,
+                )
+                if retry is not None:
+                    over_long_drops += 1
+                else:
+                    failures.append(
+                        {"task_id": task_id, "reason": f"{scope}: dropped (非超长)"}
+                    )
             examples[scope] = example
 
         assistant_example = examples["assistant"]
@@ -165,6 +186,7 @@ def _check_file(path: Path, limit: int, tokenizer, template, max_length: int) ->
         else str(path),
         "rows_checked": len(rows),
         "rows_with_assistant_content": rows_with_content,
+        "over_long_drops": over_long_drops,
         "supervised_tokens": {
             "assistant": total_assistant_tokens,
             "tool_call_only": total_toolonly_tokens,
@@ -224,6 +246,7 @@ def main() -> int:
             f"{result['supervised_tokens']['assistant']}/"
             f"{result['supervised_tokens']['tool_call_only']} "
             f"ratio={result['supervised_tokens']['ratio']} "
+            f"over_long_drops={result['over_long_drops']} "
             f"failures={result['failure_count']}"
         )
         for failure in result["failures"]:

@@ -1,0 +1,40 @@
+{
+  "schema_version": "shopping-experiment-run-v1",
+  "stage": "m5-sft-a-full-assistant",
+  "base_model": "Qwen/Qwen3.5-2B",
+  "recipe": {
+    "experiment": "sft_m5_a_full_assistant",
+    "data_variant": "full",
+    "data_pool": "data/sft_pure_v4/all.jsonl",
+    "train_rows": 1115,
+    "validation_rows": 125,
+    "loss_scope": "assistant",
+    "curriculum": "3-stage (a -> b -> c), each stage LoRA trained then merged into base",
+    "epochs_per_stage": 1,
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "learning_rate": 0.0001
+  },
+  "training_loss": {
+    "stage_a": 0.4256,
+    "stage_b": 0.3732,
+    "stage_c": 0.3672,
+    "note": "assistant 口径, 覆盖全部 assistant token"
+  },
+  "artifact": "outputs/models/sft-a-curriculum/stage-c/merged",
+  "evaluated_at": "2026-10-14",
+  "evaluation": {
+    "tasks": "data/evaluation/tasks.jsonl",
+    "expected_tasks": 200,
+    "rollouts_per_task": 1,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_steps": 35,
+    "max_generated_tokens_per_turn": 512,
+    "context_window": 24576,
+    "context_safety_margin": 512,
+    "context_compaction": false,
+    "reward_contract": "shopsimulator-reward-v3+shopsimulator-reward-v4",
+    "code_commit": "3bf597a"
+  }
+}

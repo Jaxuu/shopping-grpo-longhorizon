@@ -7,6 +7,7 @@ stored in Git.
 ```text
 baseline/   base-model evaluation config and summary
 sft/        SFT training/evaluation config and summary
+sft-m5/     M5 SFT loss-scope ablation configs and summaries
 grpo/       GRPO training/evaluation config and summary
 comparison.md
 ```

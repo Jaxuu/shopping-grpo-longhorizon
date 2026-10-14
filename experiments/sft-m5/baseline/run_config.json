@@ -1,0 +1,22 @@
+{
+  "schema_version": "shopping-experiment-run-v1",
+  "stage": "m5-baseline",
+  "model": "Qwen/Qwen3.5-2B",
+  "entrypoint": "bash scripts/baseline.sh",
+  "purpose": "M5 选型评测: 在 Reward v3+v4 双口径消费端与 Pure V4 数据管线代码（3bf597a）下复测原 baseline, 校验评测管线未被改坏",
+  "evaluated_at": "2026-10-14",
+  "evaluation": {
+    "tasks": "data/evaluation/tasks.jsonl",
+    "expected_tasks": 200,
+    "rollouts_per_task": 1,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_steps": 35,
+    "max_generated_tokens_per_turn": 512,
+    "context_window": 24576,
+    "context_safety_margin": 512,
+    "context_compaction": false,
+    "reward_contract": "shopsimulator-reward-v3+shopsimulator-reward-v4",
+    "code_commit": "3bf597a"
+  }
+}

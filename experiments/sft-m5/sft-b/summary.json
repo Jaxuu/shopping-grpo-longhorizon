@@ -1,0 +1,32 @@
+{
+  "schema_version": "shopping-experiment-summary-v1",
+  "stage": "m5-sft-b-toolcall-only",
+  "model": "Qwen3.5-2B + SFT Pure V4 curriculum (loss_scope=tool-call-only)",
+  "expected_tasks": 200,
+  "completed_tasks": 200,
+  "missing_tasks": [],
+  "done_tasks": 200,
+  "done_rate": 1.0,
+  "strict_successes": 124,
+  "strict_success_rate": 0.62,
+  "purchase_successes": 124,
+  "purchase_success_rate": 0.62,
+  "reward_valid_tasks": 198,
+  "reward_valid_rate": 0.99,
+  "mean_final_reward": 0.4943,
+  "mean_weighted_score": 0.7643,
+  "average_steps": 8.41,
+  "guard_rejections": 3,
+  "reward_type_counts": {
+    "gold_purchase": 124,
+    "max_steps": 1,
+    "partial_alternative_purchase": 48,
+    "repeat_loop": 2,
+    "reward_unverifiable": 2,
+    "wrong_purchase": 23
+  },
+  "status_counts": {
+    "done": 200
+  },
+  "reward_contract": "shopsimulator-reward-v3+shopsimulator-reward-v4"
+}

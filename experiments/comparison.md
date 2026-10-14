@@ -37,3 +37,23 @@ Machine-readable settings and summaries are stored beside each stage:
 - [`baseline/`](baseline/)
 - [`sft/`](sft/)
 - [`grpo/`](grpo/)
+- [`sft-m5/`](sft-m5/)
+
+## M5 SFT loss-scope ablation (2026-10-14)
+
+Ablation for GRPO base selection: two loss scopes on the SFT Pure V4 pool
+(1,115 train rows, 3-stage curriculum, LoRA r=16), re-evaluated with the
+baseline on the same Final-200 Clean tasks, one deterministic rollout each,
+Reward v3+v4 dual contract, code commit 3bf597a. Not directly comparable to
+the archived table above (different data pool and reward consumer).
+
+| Model | Loss scope | Done | Strict success | Purchase success | Mean reward | Mean steps | Guard rejections |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Qwen3.5-2B baseline (re-run) | — | 22.0% | 0.0% | 0.0% | -0.1391 | 5.57 | 706 |
+| M5-A (full / assistant) | assistant | 98.5% | 59.0% | 59.0% | 0.4359 | 8.07 | 17 |
+| **M5-B (full / tool-call-only)** | tool-call-only | **100.0%** | **62.0%** | **62.0%** | **0.4943** | 8.41 | **3** |
+
+Selection: M5-B wins on every reported metric and is chosen as the GRPO base.
+The baseline re-run reproduces 0.0% strict/purchase success, confirming the
+evaluation harness under the Reward v4 consumer. See [`sft-m5/`](sft-m5/)
+for configs, summaries and limitations.
