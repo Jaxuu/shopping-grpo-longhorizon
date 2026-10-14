@@ -46,7 +46,7 @@ actor_rollout_ref:
     kl_loss_coef: 0.0
     kl_loss_type: low_var_kl
     optim:
-      lr: 1.0e-6
+      lr: 5.0e-6
       lr_warmup_steps_ratio: 0.03
     fsdp_config:
       optimizer_offload: true
@@ -130,9 +130,12 @@ ray_kwargs:
 
 trainer:
   total_epochs: 50
-  total_training_steps: 500
-  save_freq: 50
-  test_freq: 50
+  total_training_steps: 100
+  # 5 小时硬预算下实际步数由实测单步耗时决定（见 plans/m6-grpo-runbook.md §3.10），
+  # save_freq=5 只占几百 MB，留作"两次验证之间崩了"的兜底；验证是贵的那一项，放到 10。
+  # 注意：选点只看有 val 的 step（10 的倍数），5/15/25 这类 checkpoint 选点脚本会排除。
+  save_freq: 5
+  test_freq: 10
   val_before_train: true
   logger: [console]
   project_name: shopping-grpo

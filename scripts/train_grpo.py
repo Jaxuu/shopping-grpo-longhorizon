@@ -44,6 +44,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--experiment-name", default="shopping-agent-grpo")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "从输出目录里最新的 global_step_* checkpoint 续跑"
+            "（veRL resume_mode=auto）；不加该开关时输出目录必须为空"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "hydra_overrides",
@@ -76,8 +84,17 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
     if output.exists():
         if not output.is_dir():
             raise SystemExit(f"output must be a directory: {output}")
-        if any(output.iterdir()):
-            raise SystemExit(f"output directory must be new or empty: {output}")
+        if any(output.iterdir()) and not args.resume:
+            raise SystemExit(
+                f"output directory must be new or empty: {output}\n"
+                "  若要从已有 checkpoint 续跑，请加 --resume"
+            )
+    if args.resume:
+        checkpoints = sorted(output.glob("global_step_*")) if output.is_dir() else []
+        if not checkpoints:
+            raise SystemExit(
+                f"--resume 指定但输出目录里没有 global_step_* checkpoint：{output}"
+            )
     if args.logger == "swanlab" and not os.environ.get("SWANLAB_API_KEY"):
         raise SystemExit("--logger swanlab requires SWANLAB_API_KEY")
 
@@ -108,33 +125,44 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
                 "SWANLAB_LOG_DIR": str(output / "swanlab"),
             }
         )
-    logger_override = (
-        "trainer.logger=[console,swanlab]"
-        if args.logger == "swanlab"
-        else "trainer.logger=[console]"
-    )
-    overrides = [
-        logger_override,
-        f"trainer.experiment_name={args.experiment_name}",
-    ]
-    extra = list(args.hydra_overrides)
-    if extra[:1] == ["--"]:
-        extra = extra[1:]
     command = [
         sys.executable,
         "-m",
         "verl.trainer.main_ppo",
         f"--config-path={config.parent}",
         f"--config-name={config.stem}",
-        *overrides,
-        *extra,
+        *build_overrides(args),
     ]
     return command, environment
+
+
+def build_overrides(args: argparse.Namespace) -> list[str]:
+    """构造 veRL 的 Hydra override 列表：logger、实验名，以及 `--` 之后的额外参数。
+
+    `build_command` 组装训练命令、`main` 组装预检命令都要用它，抽成独立函数避免两处漂移。
+    """
+    logger_override = (
+        "trainer.logger=[console,swanlab]"
+        if args.logger == "swanlab"
+        else "trainer.logger=[console]"
+    )
+    extra = list(args.hydra_overrides)
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    return [
+        logger_override,
+        f"trainer.experiment_name={args.experiment_name}",
+        *extra,
+    ]
 
 
 def main() -> None:
     args = parse_args()
     command, environment = build_command(args)
+    output = Path(environment["GRPO_OUTPUT_DIR"])
+    resume_checkpoints = (
+        sorted(output.glob("global_step_*")) if args.resume and output.is_dir() else []
+    )
     audit = {
         "command": command,
         "model": environment["GRPO_MODEL_PATH"],
@@ -144,6 +172,8 @@ def main() -> None:
         "output": environment["GRPO_OUTPUT_DIR"],
         "logger": args.logger,
         "config": str(args.config.resolve()),
+        "resume": args.resume,
+        "resume_from": str(resume_checkpoints[-1]) if resume_checkpoints else None,
     }
     print(json.dumps(audit, ensure_ascii=False, indent=2))
     if args.dry_run:
@@ -152,8 +182,7 @@ def main() -> None:
     preflight = [
         sys.executable,
         str(ROOT / "scripts/check_grpo_runtime.py"),
-        *overrides,
-        *extra,
+        *build_overrides(args),
     ]
     preflight_status = subprocess.call(preflight, cwd=ROOT, env=environment)
     if preflight_status:
