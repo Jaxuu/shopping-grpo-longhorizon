@@ -69,8 +69,8 @@ Important defaults (see [`configs/grpo.yaml`](../configs/grpo.yaml)):
 | LoRA rank / alpha | 16 / 32 |
 | Maximum response length | 16,384 |
 | Maximum model length | 24,576 |
-| Maximum training steps | 100 |
-| Save / validation frequency | 5 / 10 |
+| Maximum training steps | 50 |
+| Save / validation frequency | 25 / 25 |
 | Clip ratio low / high | 0.20 / 0.28 |
 | KL reward / KL loss | disabled / disabled |
 | Policy entropy measurement | disabled (`entropy_coeff` is 0, so it only wasted wall-clock) |
@@ -85,11 +85,56 @@ continue.
 
 Two settings are load-bearing and must stay aligned:
 
-- `trainer.save_freq` must be **≤ and aligned with** `trainer.test_freq`.
+- `trainer.save_freq` must be **≤ and divide** `trainer.test_freq`.
   Validation happens only on optimizer-updated steps, so a validation point with
   no matching `global_step_*` checkpoint is wasted.
-- `trainer.test_freq` must be small enough to yield several validation points.
-  Selecting a checkpoint needs a curve, not a single number.
+- `trainer.test_freq` must be small enough to yield enough validation points to
+  pick from. The shipped default (`25` over 50 steps) deliberately accepts the
+  bare minimum of two points to keep the disk footprint at ~8.4 GB; if a finer
+  curve is worth ~32 extra minutes of validation and ~21 GB, use `10 / 10`
+  instead (see the table below).
+
+The final step is always checkpointed and always validated: the sampling patch
+gates both on `is_last_step or step % freq == 0`, where
+`is_last_step = step >= trainer.total_training_steps`. So with
+`total_training_steps=50` the run stops by itself and step 50 always has both a
+`global_step_50/` checkpoint and a `val/*` score, whatever the frequencies are.
+
+Each `global_step_N/` holds the **full model state dict**, not just the LoRA
+adapter: `FSDPCheckpointManager` calls `model.state_dict()` without any LoRA
+filtering, and `verl/model_merger` relies on that — it strips `.base_layer.` from
+the remaining keys to recover the base weights, which only works because they are
+present. For a 2B model in bf16 that is roughly **4 GB per checkpoint**, plus
+~150 MB of Adam state for the LoRA parameters and a few MB of config/tokenizer
+under `huggingface/` (not weights — `checkpoint.save_contents` defaults to
+`[model, optimizer, extra]`, so no second HF copy is written).
+
+`trainer.save_freq` therefore drives the disk footprint directly, and it must
+divide `trainer.test_freq` (see above): with `test_freq=25` only `save_freq` of
+1, 5, or 25 keeps every validation point backed by a checkpoint.
+
+Nothing prunes old checkpoints (`trainer.max_actor_ckpt_to_keep` is unset), so
+the footprint is simply `total_training_steps / save_freq` copies of ~4.2 GB:
+
+| `save_freq` / `test_freq` | checkpoints kept | disk | validation points with a checkpoint |
+|---|---|---|---|
+| **25 / 25** (default) | 2 (step 25, 50) | **~8.4 GB** | 25, 50 |
+| 10 / 10 | 5 | ~21 GB | 10, 20, 30, 40, 50 |
+| 5 / 25 | 10 | ~42 GB | 25, 50 |
+
+Note that `5 / 25` and `25 / 25` produce the **same** checkpoint-selection
+candidates — the extra 34 GB only buys finer crash recovery, not a better pick.
+A keep-limit is not a safe substitute for a larger `save_freq` either: it retains
+the *most recent* N, so it would evict step 25 long before step 50 and checkpoint
+selection would lose that candidate. Add ~4 GB for the exported merged model.
+
+Resuming a finished or interrupted run appends to the same
+`training_diagnostics.jsonl` (the writer opens it in append mode), so earlier
+`val/*` records survive and checkpoint selection still sees the whole curve. Set
+`trainer.total_training_steps` to the new, larger target and pass `--resume`
+together with **exactly the same** overrides as the first segment. With the
+default `save_freq=25` an interruption costs up to 24 steps of progress, since
+the newest checkpoint may be that far behind.
 
 Dynamic sampling can generate at most three batches to find a useful update and
 permits at most ten consecutive skipped updates. These bounds prevent an
@@ -104,7 +149,9 @@ fractions, response lengths and effective-group rates. `skipped_update` records
 make zero-signal attempts visible even though they do not advance the optimizer
 step.
 
-Advanced overrides may be appended after `--`:
+Advanced overrides may be appended after `--`. Any change to `save_freq` /
+`test_freq` must still satisfy `save_freq ≤ test_freq` and
+`test_freq % save_freq == 0`:
 
 ```bash
 bash scripts/grpo.sh -- \
@@ -154,7 +201,7 @@ actor directory that the selector printed:
 
 ```bash
 bash scripts/export_grpo.sh \
-  outputs/models/grpo/global_step_75/actor \
+  outputs/models/grpo/global_step_50/actor \
   outputs/models/grpo-merged
 ```
 
