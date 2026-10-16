@@ -52,6 +52,13 @@ DEFAULT_TOLERANCE = 1.0e-8
 # 的十分之一量级，足以区分"真的有差异"与"数值抖动"。
 DEFAULT_NEAR_DEGENERATE_STD = 0.05
 
+# 训练侧实测的「可用组」接受率（标定锚点）。反解自第一轮正式训练：
+# 50 步共 82 次尝试 ⇒ 1.64 次/步 ⇒ 单次成功率 50/82 = 61.0% ⇒ p ≈ 0.338；
+# 用 `fill_probability` 交叉验证：预测 80.6 次 vs 实测 82 次，误差 1.7%。
+# ⚠️ 探针的 `reward_varying` 率（本仓库实测 42.8%）**不是**这个量 —— 它把
+# sampling-invalid 的组也算作"能收"，会高估接受率、低估重试成本。
+TRAINING_OBSERVED_ACCEPT_RATE = 0.338
+
 # tolerance 扫描：问"如果把准入阈值从 1e-8 提高到这里，池子还剩多少、还能不能收满"。
 TOLERANCE_SWEEP = (1.0e-8, 1.0e-3, 1.0e-2, 5.0e-2, 1.0e-1, 2.0e-1, 3.0e-1)
 
@@ -187,9 +194,12 @@ def analyze(
     meaningful = [row for row in varying if float(row.get("utility_std") or 0.0) >= near_degenerate_std]
 
     # ── tolerance 扫描：把准入阈值提高会怎样 ────────────────────────────
+    # ⚠️ 分母必须是 `eligible`（无 sampling-invalid **且** spread > tolerance），
+    # 不是 `reward_varying`：后者把 sampling-invalid 的组也算作"能收"，会高估接受率、
+    # 低估重试成本（2026-10-17 实测：varying 42.8% / eligible 36.6% / 训练侧 33.8%）。
     sweep_rows = []
     for threshold in sweep:
-        surviving = [row for row in labels if spread(row) > threshold]
+        surviving = [row for row in kept if spread(row) > threshold]
         accept_rate = _rate(len(surviving), total)
         fill = fill_probability(accept_rate)
         sweep_rows.append(
@@ -265,7 +275,15 @@ def analyze(
         "tolerance_sweep": sweep_rows,
         "by_pass_count": by_pass_count,
         "pass_bands": band_rows,
-        "current_fill": fill_probability(_rate(len(varying), total)),
+        "current_fill": fill_probability(_rate(len(kept), total)),
+        "fill_calibration": {
+            "eligible_rate": _rate(len(kept), total),
+            "eligible_fill": fill_probability(_rate(len(kept), total)),
+            "varying_rate": _rate(len(varying), total),
+            "varying_fill": fill_probability(_rate(len(varying), total)),
+            "training_observed_rate": TRAINING_OBSERVED_ACCEPT_RATE,
+            "training_observed_fill": fill_probability(TRAINING_OBSERVED_ACCEPT_RATE),
+        },
     }
 
 
@@ -370,6 +388,12 @@ def render(summary: dict[str, Any]) -> str:
 
     out.append("## 4. tolerance 扫描（提高准入阈值的代价）")
     out.append("")
+    out.append(
+        "> 口径：**存活题数** = `eligible`（无 sampling-invalid 且 spread > tolerance）中 "
+        "spread 仍大于该阈值的题数；**接受率** = 存活题数 / 全池。"
+        "⚠️ 分母**不能**用 `reward_varying` —— 它含 sampling-invalid 的组，会高估接受率。"
+    )
+    out.append("")
     out.append("| tolerance | 存活题数 | 接受率 | 3 批内收满 4 组的概率 | 期望用批数 | 每步期望尝试数 |")
     out.append("|---|---|---|---|---|---|")
     for row in summary["tolerance_sweep"]:
@@ -387,6 +411,18 @@ def render(summary: dict[str, Any]) -> str:
         f"每步期望尝试 **{1.0 / current['success_probability']:.2f}** 次。"
     )
     out.append("")
+    calibration = summary.get("fill_calibration")
+    if calibration:
+        out.append(
+            f"> **标定（2026-10-17）**：探针 `eligible` 率 {calibration['eligible_rate']:.1%} ⇒ "
+            f"每步期望尝试 {1.0 / calibration['eligible_fill']['success_probability']:.2f} 次；"
+            f"**训练侧实测** {calibration['training_observed_rate']:.1%} ⇒ "
+            f"{1.0 / calibration['training_observed_fill']['success_probability']:.2f} 次"
+            "（与第一轮 82 次尝试 / 50 步 = 1.64 次/步 一致）；"
+            f"若误用 `reward_varying` 率 {calibration['varying_rate']:.1%} 会得到 "
+            f"{1.0 / calibration['varying_fill']['success_probability']:.2f} 次，**那是高估**。"
+        )
+        out.append("")
     out.append(
         "> 读法：提高 tolerance 会**缩小**接受率 ⇒ 收满 4 组的概率下降、每步尝试数上升。"
         "例如接受率 33.8% → 25% 时，每步期望尝试数 1.61 → 2.85，"

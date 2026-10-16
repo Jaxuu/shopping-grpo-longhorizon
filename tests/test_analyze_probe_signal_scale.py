@@ -181,6 +181,20 @@ def _mixed_pool() -> list[dict]:
     for _ in range(2):
         tid += 1
         rows.append(label(tid, utility_min=0.19, utility_max=0.21, utility_std=0.01))
+    # 2 道 spread 不小但 sampling-invalid ⇒ `reward_varying` 为真、`eligible` 为假。
+    # 用来钉住"接受率的分母必须是 eligible"这个口径（否则夹具里两者相等，测不出区别）。
+    for _ in range(2):
+        tid += 1
+        rows.append(
+            label(
+                tid,
+                utility_min=-0.85,
+                utility_max=1.0,
+                pass_count=1,
+                pass_rate=0.25,
+                eligible=False,
+            )
+        )
     # 4 道零方差（constant_reward，未保留）
     for _ in range(4):
         tid += 1
@@ -202,18 +216,18 @@ def _mixed_pool() -> list[dict]:
 class TestAnalyze:
     def test_totals_and_rates(self) -> None:
         summary = analyze(_mixed_pool())
-        assert summary["totals"]["tasks"] == 12
-        assert summary["totals"]["varying"] == 8
+        assert summary["totals"]["tasks"] == 14
+        assert summary["totals"]["varying"] == 10  # 含 2 道 sampling-invalid
         assert summary["totals"]["kept"] == 8
-        assert summary["totals"]["varying_rate"] == pytest.approx(8 / 12)
+        assert summary["totals"]["varying_rate"] == pytest.approx(10 / 14)
 
     def test_near_degenerate_split(self) -> None:
         summary = analyze(_mixed_pool(), near_degenerate_std=0.05)
         near = summary["near_degenerate"]
         assert near["tasks"] == 2
-        assert near["rate_of_varying"] == pytest.approx(2 / 8)
-        assert near["meaningful_tasks"] == 6
-        assert near["meaningful_rate_of_varying"] == pytest.approx(6 / 8)
+        assert near["rate_of_varying"] == pytest.approx(2 / 10)
+        assert near["meaningful_tasks"] == 8
+        assert near["meaningful_rate_of_varying"] == pytest.approx(8 / 10)
 
     def test_spread_quantiles_only_over_varying(self) -> None:
         summary = analyze(_mixed_pool())
@@ -233,13 +247,15 @@ class TestAnalyze:
     def test_sweep_reports_fill_cost(self) -> None:
         summary = analyze(_mixed_pool())
         at_005 = next(row for row in summary["tolerance_sweep"] if row["tolerance"] == 0.05)
-        # 6/12 = 50% 接受率 ⇒ 3 批内收满 4 组的概率应明显低于 1
-        assert at_005["accept_rate"] == pytest.approx(0.5)
-        assert at_005["success_probability"] == pytest.approx(fill_probability(0.5)["success_probability"])
+        # 6/14 接受率（分母是全池，分子只数 eligible）⇒ 概率应明显低于 1
+        assert at_005["accept_rate"] == pytest.approx(6 / 14)
+        assert at_005["success_probability"] == pytest.approx(
+            fill_probability(6 / 14)["success_probability"]
+        )
 
     def test_by_pass_count_groups_by_successes(self) -> None:
         summary = analyze(_mixed_pool())
-        assert summary["by_pass_count"]["1"]["tasks"] == 6
+        assert summary["by_pass_count"]["1"]["tasks"] == 8
         assert summary["by_pass_count"]["1"]["varying_rate"] == pytest.approx(1.0)
         # pass_count=4 的组是零方差 ⇒ varying 率 0
         assert summary["by_pass_count"]["4"]["varying_rate"] == pytest.approx(0.0)
@@ -248,14 +264,27 @@ class TestAnalyze:
         summary = analyze(_mixed_pool())
         full = summary["pass_bands"][0]
         assert full["band"] == [0.0, 1.0]
-        assert full["tasks"] == 12
+        assert full["tasks"] == 14
         assert full["eligible_tasks"] == 8
 
-    def test_current_fill_uses_overall_varying_rate(self) -> None:
+    def test_current_fill_uses_eligible_rate_not_varying(self) -> None:
         summary = analyze(_mixed_pool())
+        # 8/14（eligible），**不是** 10/14（reward_varying）
         assert summary["current_fill"]["success_probability"] == pytest.approx(
-            fill_probability(8 / 12)["success_probability"]
+            fill_probability(8 / 14)["success_probability"]
         )
+
+    def test_sweep_denominator_ignores_sampling_invalid_groups(self) -> None:
+        baseline = analyze(_mixed_pool())["tolerance_sweep"][0]
+        assert baseline["surviving_tasks"] == 8
+        assert baseline["accept_rate"] == pytest.approx(8 / 14)
+        assert baseline["accept_rate"] != pytest.approx(10 / 14)
+
+    def test_calibration_reports_all_three_rates(self) -> None:
+        calibration = analyze(_mixed_pool())["fill_calibration"]
+        assert calibration["eligible_rate"] == pytest.approx(8 / 14)
+        assert calibration["varying_rate"] == pytest.approx(10 / 14)
+        assert calibration["training_observed_rate"] == pytest.approx(0.338)
 
     def test_rejects_empty_labels(self) -> None:
         with pytest.raises(ValueError, match="labels 为空"):
@@ -339,7 +368,7 @@ class TestMain:
         code = main([str(labels_path), "--json"])
         assert code == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["totals"]["tasks"] == 12
+        assert payload["totals"]["tasks"] == 14
 
     def test_missing_file_returns_two(self, tmp_path, capsys) -> None:
         code = main([str(tmp_path / "nope.jsonl")])
