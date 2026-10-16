@@ -51,6 +51,16 @@ actor_rollout_ref:
     fsdp_config:
       optimizer_offload: true
       param_offload: true
+      # 2026-10-17：`calculate_entropy: true` 的显存保险（第二轮起打开熵测量）。
+      # 熵前向要物化两个 [tokens, 248320] 的 fp32 临时量，且 calculate_entropy 会强制
+      # inplace_backward=False（verl/workers/engine/fsdp/transformer_impl.py）⇒ 反向
+      # 结束前多留一份 [tokens, V]。按 max_response_length=16384 估算边际峰值 ≈23 GB，
+      # 叠加第一轮实测 reserved 58.8 GB 会越过 84 GB 卡；开分块后峰值变成有界的
+      # ≈3×[2048, V] fp32 ≈6 GB，且与序列长度无关（逐行 softmax，数值等价）。
+      # ⚠️ 生效路径必须在 fsdp_config 这一层：engine_workers.py 传给 FSDPEngine 的是
+      # actor_config.engine，而 FSDPActorConfig.__post_init__ 只把它指向 fsdp_config，
+      # **不会**同步同名的顶层字段 actor.entropy_from_logits_with_chunking（死字段）。
+      entropy_from_logits_with_chunking: true
   rollout:
     name: vllm
     mode: async

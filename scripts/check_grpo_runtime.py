@@ -328,6 +328,34 @@ def ppo_gradient_accumulation_steps(mini_batch_size: int, micro_batch_size: int)
     return mini // micro
 
 
+def validate_entropy_memory_guard(actor) -> None:
+    """拒绝「开了熵测量但没开分块」的配置，否则长轨迹步会 OOM。
+
+    `calculate_entropy=true` 的两处额外开销都随「响应长度 × 词表」线性增长：
+    ① 熵前向 `softmax(logits, -1)` 与 `sum(pd * logits, -1)` 各物化一个
+    `[tokens, vocab]` fp32 临时量；② 它会强制 `inplace_backward = False`
+    （`verl/workers/engine/fsdp/transformer_impl.py`），使 logprob 的反向多留一份
+    `[tokens, vocab]` 直到反向结束。按 vocab=248320、`max_response_length=16384`
+    估算，边际峰值 ≈23 GB，叠加第一轮实测 `max_memory_reserved` 58.8 GB 会越过 84 GB
+    卡。`entropy_from_logits_with_chunking` 把 softmax 切成 2048 行一块，峰值变成有界
+    的 ≈6 GB（逐行 softmax，数值等价）。
+
+    生效路径是 `actor.fsdp_config.entropy_from_logits_with_chunking`：
+    `engine_workers.py` 传给 FSDPEngine 的是 `actor_config.engine`，而
+    `FSDPActorConfig.__post_init__` 把它指向 `fsdp_config`，并**不**把同名的
+    `actor.entropy_from_logits_with_chunking` 同步过去（那个字段不生效）。
+    """
+    if not bool(actor.calculate_entropy):
+        return
+    if not bool(actor.fsdp_config.entropy_from_logits_with_chunking):
+        raise SystemExit(
+            "calculate_entropy=true requires bounded entropy computation; set "
+            "actor_rollout_ref.actor.fsdp_config.entropy_from_logits_with_chunking=true "
+            "(the same-named flag directly under actor_rollout_ref.actor is ignored by "
+            "the FSDP engine, so it will not help)"
+        )
+
+
 def validate_training_memory_budget(config):
     prompt_length = int(config.data.max_prompt_length)
     response_length = int(config.data.max_response_length)
@@ -335,6 +363,8 @@ def validate_training_memory_budget(config):
     actor = config.actor_rollout_ref.actor
     rollout = config.actor_rollout_ref.rollout
     reference = config.actor_rollout_ref.ref
+
+    validate_entropy_memory_guard(actor)
 
     if response_length > MAX_SAFE_RESPONSE_LENGTH:
         raise SystemExit(
@@ -401,6 +431,10 @@ def validate_training_memory_budget(config):
                 "actor_micro_batch_size_per_gpu": actor_micro_batch_size,
                 "actor_gradient_accumulation_steps": gradient_accumulation_steps,
                 "actor_dynamic_batch": False,
+                "actor_calculate_entropy": bool(actor.calculate_entropy),
+                "actor_entropy_from_logits_with_chunking": bool(
+                    actor.fsdp_config.entropy_from_logits_with_chunking
+                ),
                 "rollout_log_prob_micro_batch_size_per_gpu": 1,
                 "rollout_log_prob_dynamic_batch": False,
                 "reference_micro_batch_size_per_gpu": 1,

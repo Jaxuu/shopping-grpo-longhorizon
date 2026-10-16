@@ -73,33 +73,50 @@ Important defaults (see [`configs/grpo.yaml`](../configs/grpo.yaml)):
 | Save / validation frequency | 25 / 25 |
 | Clip ratio low / high | 0.20 / 0.28 |
 | KL reward / KL loss | disabled / disabled |
-| Policy entropy measurement | disabled (`entropy_coeff` is 0, so it only wasted wall-clock) |
+| Policy entropy measurement | enabled (`entropy_coeff` is 0, so the value is logged but never enters the loss) |
 
-`train_batch_size` (4), `clip_ratio_high` (0.28), `max_response_length` (16384),
-`rollout.enforce_eager` (true) and `actor.calculate_entropy` (false) are **command-line
-overrides**, not YAML values. The YAML keeps the repository's own settings
-(2 / 0.20 / 20480 / unset / true) so that `experiments.json`'s `grpo_baseline` still
-describes the original recipe. Forgetting one of them silently runs a different
-configuration; verify the `command` array in the audit JSON before letting the job
-continue.
+`train_batch_size` (4), `clip_ratio_high` (0.28), `max_response_length` (16384)
+and `rollout.enforce_eager` (true) are **command-line overrides**, not YAML values.
+The YAML keeps the repository's own settings (2 / 0.20 / 20480 / unset) so that
+`experiments.json`'s `grpo_baseline` still describes the original recipe. Forgetting
+one of them silently runs a different configuration; verify the `command` array in
+the audit JSON before letting the job continue.
 
-Two of those YAML values need a caveat, because "the repository's settings" is not
-always "the settings used for the reported baseline run":
+One YAML value needs a caveat, because "the repository's settings" is not always
+"the settings used for the reported baseline run":
 
 - `actor.calculate_entropy`: the YAML says `true`, but that value was introduced in
   `2923a34` (2026-08-10) — **after** the reference GRPO result was recorded in
   `8979f22` (2026-07-29), where the value was `false`, matching veRL 0.8.0's own
   default (`verl/workers/config/actor.py`: `calculate_entropy: bool = False`).
-  So the `false` override **matches** the reported baseline rather than deviating
-  from it; it is a deviation only from the repository's current YAML.
+  Round 1 therefore overrode it back to `false`; from round 2 onward the YAML value
+  is used as-is, so the `actor/entropy` curve is recorded.
 - `rollout.enforce_eager` was left unset in the YAML because the original run had no
   need for it; the override exists purely to stop vLLM from re-capturing CUDA graphs
   on every weight sync (measured `timing_s/update_weights` 147–198 s → 8 s).
 
 `calculate_entropy` is a **measurement** switch only: `entropy_coeff` is `0`, so
-entropy never enters the loss. Turning it on buys the `actor/entropy` curve (the
-standard early warning for entropy collapse) at the cost of wall-clock and memory —
-see the note below.
+entropy never enters the loss. It buys the `actor/entropy` curve (the standard early
+warning for entropy collapse) at the cost of wall-clock (~15–30% of `update_actor`)
+and memory. That memory cost is why the YAML pairs it with
+`actor.fsdp_config.entropy_from_logits_with_chunking: true`, and why
+[`scripts/check_grpo_runtime.py`](../scripts/check_grpo_runtime.py) refuses to start
+when `calculate_entropy` is on without it:
+
+- entropy is computed from `softmax(logits, -1)`, which materialises two
+  `[tokens, vocab]` fp32 temporaries per micro-batch, and `calculate_entropy` forces
+  `inplace_backward = False` (`verl/workers/engine/fsdp/transformer_impl.py`), so one
+  more `[tokens, vocab]` stays resident until the backward pass ends. At
+  `vocab=248320` and `max_response_length=16384` that is ~23 GB of marginal peak on
+  top of the ~58.8 GB reserved by round 1 — past an 84 GB card.
+- `entropy_from_logits_with_chunking` splits the softmax into 2048-row chunks, which
+  bounds that peak at ~6 GB and makes it independent of trajectory length. It is a
+  row-wise softmax, so the numbers are identical.
+- The effective path is `actor.fsdp_config.*`, **not** `actor.*`:
+  `engine_workers.py` hands `actor_config.engine` to `FSDPEngine`, and
+  `FSDPActorConfig.__post_init__` only points `engine` at `fsdp_config` — the
+  same-named `actor.entropy_from_logits_with_chunking` field is never copied over,
+  so setting it there is a silent no-op.
 
 Two settings are load-bearing and must stay aligned:
 
