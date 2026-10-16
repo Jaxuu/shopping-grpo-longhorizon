@@ -10,9 +10,11 @@ import pytest
 from scripts.analyze_grpo_diagnostics import (
     analyse,
     compare_with_probe,
+    estimate_filter_saving,
     read_records,
     render,
     summarize_metrics,
+    summarize_timing,
 )
 
 
@@ -148,18 +150,43 @@ def test_summarize_metrics_picks_interesting_keys(tmp_path):
 def test_render_reports_zero_lost_steps_and_points_at_lr(tmp_path):
     """渲染结果应明确「0 步丢失」，并在 KL 贴 0 时把矛头指向 lr/步数/n 而非数据集。"""
     records = [
-        generation_batch(1, 1, [group(True, True) for _ in range(4)]),
+        generation_batch(1, 1, [group(True, True) for _ in range(4)], accepted_after=4),
         {"event": "optimizer_step", "global_step": 1, "metrics": {"actor/ppo_kl": 0.0001}},
-        generation_batch(2, 1, [group(True, True) for _ in range(4)]),
+        generation_batch(2, 1, [group(True, True) for _ in range(4)], accepted_after=4),
         {"event": "optimizer_step", "global_step": 2, "metrics": {"actor/ppo_kl": 0.0002}},
     ]
     summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
     text = render(summary, probe=None, max_gen_batches=3)
 
     assert "完全没有任何更新的步" in text
-    assert "0" in text
+    assert "每一步都收满了" in text
     assert "lr" in text
-    assert "不该改数据集" in text
+    assert "不能指望改数据集带来提升" in text
+
+
+def test_render_includes_cost_breakdown_and_filter_saving(tmp_path):
+    """成本结构章节应给出 rollout 占比与过滤的省时估算。"""
+    records = [
+        generation_batch(1, 1, [group(True, True)] * 4, accepted_after=4),
+        {
+            "event": "optimizer_step",
+            "global_step": 1,
+            "metrics": {"actor/ppo_kl": 0.005, "timing_s/step": 140.0, "timing_s/gen": 40.0},
+        },
+        generation_batch(2, 1, [group(True, True)] * 4, accepted_after=4),
+        {
+            "event": "optimizer_step",
+            "global_step": 2,
+            "metrics": {"actor/ppo_kl": 0.006, "timing_s/step": 140.0, "timing_s/gen": 40.0},
+        },
+    ]
+    summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
+    text = render(summary, probe=None, max_gen_batches=3)
+
+    assert "成本结构" in text
+    assert "timing_s/gen" in text
+    assert "28.6%" in text  # 40 / 140
+    assert "分钟" in text
 
 
 def test_batch_fill_reports_whether_every_step_reached_target(tmp_path):
@@ -215,6 +242,82 @@ def test_batch_fill_is_absent_when_fields_missing(tmp_path):
     summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
     assert summary["batch_fill"]["steps_with_fill_info"] == 0
     assert summary["batch_fill"]["target_prompts"] is None
+
+
+def test_summarize_timing_computes_step_shares():
+    per_step = {
+        1: {"timing_s/step": 140.0, "timing_s/gen": 42.0, "timing_s/update_actor": 80.0},
+        2: {"timing_s/step": 160.0, "timing_s/gen": 38.0, "timing_s/update_actor": 100.0},
+    }
+    timing = summarize_timing(per_step)
+
+    assert timing["available"] is True
+    assert timing["step_seconds"] == pytest.approx(150.0)
+    assert timing["mean_seconds"]["timing_s/gen"] == pytest.approx(40.0)
+    # 40 / 150 ≈ 26.7%
+    assert timing["shares"]["timing_s/gen"] == pytest.approx(40.0 / 150.0)
+    # mean_seconds 按耗时降序：step(150) > update_actor(90) > gen(40)
+    assert list(timing["mean_seconds"]) == [
+        "timing_s/step",
+        "timing_s/update_actor",
+        "timing_s/gen",
+    ]
+
+
+def test_summarize_timing_falls_back_when_step_key_missing():
+    timing = summarize_timing({1: {"timing_s/gen": 40.0, "timing_s/update_actor": 90.0}})
+    assert timing["available"] is True
+    # 没有 timing_s/step 时用最大分项兜底，并在来源里标注
+    assert timing["step_seconds"] == pytest.approx(90.0)
+    assert "max(" in timing["step_seconds_source"]
+
+
+def test_estimate_filter_saving_uses_measured_batches_and_rollout_share(tmp_path):
+    """过滤省时估算 = rollout 平均耗时 × generation batch 的下降比例。"""
+    records = []
+    for step in range(1, 5):
+        # 每步 2 个 batch（模拟重试），共 8 个 batch
+        for index in (1, 2):
+            records.append(
+                generation_batch(
+                    step,
+                    index,
+                    [group(True, True)] * 4,
+                    accepted_after=4,
+                )
+            )
+        records.append(
+            {
+                "event": "optimizer_step",
+                "global_step": step,
+                "metrics": {"timing_s/step": 100.0, "timing_s/gen": 40.0},
+            }
+        )
+    summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
+
+    saving = summary["filter_saving_estimate"]
+    assert saving is not None
+    assert saving["rollout_key"] == "timing_s/gen"
+    assert saving["rollout_share"] == pytest.approx(0.4)
+    assert saving["batches_before"] == 8
+    # 过滤后：4 步 × 1.2 = 4.8 个 batch ⇒ 下降 40%
+    assert saving["batches_after_estimate"] == pytest.approx(4.8)
+    assert saving["batch_reduction"] == pytest.approx(1 - 4.8 / 8)
+    assert saving["saved_seconds_per_step"] == pytest.approx(40.0 * (1 - 4.8 / 8))
+    # 4 步 × 每步省下的秒数 / 60
+    assert saving["saved_minutes_total"] == pytest.approx(
+        40.0 * (1 - 4.8 / 8) * 4 / 60.0
+    )
+
+
+def test_no_timing_keys_means_no_saving_estimate(tmp_path):
+    records = [
+        generation_batch(1, 1, [group(True, True)] * 4, accepted_after=4),
+        {"event": "optimizer_step", "global_step": 1, "metrics": {"actor/ppo_kl": 0.01}},
+    ]
+    summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
+    assert summary["timing"]["available"] is False
+    assert summary["filter_saving_estimate"] is None
 
 
 def test_compare_with_probe_computes_rates(tmp_path):

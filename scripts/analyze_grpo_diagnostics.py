@@ -194,7 +194,9 @@ def analyse(records: list[dict]) -> dict:
             ),
         },
         "optimizer_metrics": summarize_metrics(updated_metrics),
+        "timing": summarize_timing(updated_metrics),
     }
+    summary["filter_saving_estimate"] = estimate_filter_saving(summary)
     return summary
 
 
@@ -245,6 +247,97 @@ def summarize_metrics(per_step: dict[int, dict]) -> dict:
         "num_steps_with_metrics": len(per_step),
         "available_metric_keys": len(series),
         "picked": picked,
+    }
+
+
+def summarize_timing(per_step: dict[int, dict]) -> dict:
+    """抽取 veRL 的分阶段计时（`timing_s/*`），算各阶段占单步的比例。
+
+    用途：回答"过滤训练集到底能省多少墙钟"。补丁把 optimizer_step 的完整 metrics
+    落盘，veRL 的 `timing_s/gen`（rollout）、`timing_s/update_actor`、`timing_s/step`
+    等都在里面，所以不需要额外埋点。
+    """
+    series: dict[str, list[float]] = defaultdict(list)
+    for step in sorted(per_step):
+        for key, value in (per_step[step] or {}).items():
+            if not str(key).startswith("timing_s/"):
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            number = float(value)
+            if number != number or number < 0:  # NaN / 负值
+                continue
+            series[str(key)].append(number)
+
+    if not series:
+        return {"available": False, "mean_seconds": {}, "shares": {}, "step_seconds": 0.0}
+
+    means = {key: statistics.mean(values) for key, values in series.items()}
+    # `timing_s/step` 是单步总耗时；缺失时用最大分项兜底（标注出来）。
+    step_key = "timing_s/step"
+    if step_key in means and means[step_key] > 0:
+        step_seconds = means[step_key]
+        step_seconds_source = step_key
+    else:
+        step_seconds = max(means.values())
+        step_seconds_source = f"max(分项) = {max(means, key=means.get)}"
+
+    shares = {
+        key: (value / step_seconds if step_seconds else 0.0)
+        for key, value in means.items()
+        if key != step_key
+    }
+    return {
+        "available": True,
+        "step_seconds": step_seconds,
+        "step_seconds_source": step_seconds_source,
+        "mean_seconds": dict(sorted(means.items(), key=lambda item: -item[1])),
+        "shares": dict(sorted(shares.items(), key=lambda item: -item[1])),
+        "num_steps_with_timing": len(per_step),
+    }
+
+
+ROLLOUT_TIMING_KEYS = ("timing_s/gen", "timing_s/rollout", "timing_s/generate_sequence")
+
+
+def estimate_filter_saving(summary: dict) -> dict | None:
+    """估算"把训练集过滤到 332 题"能省多少墙钟。
+
+    口径：过滤后每个 step 的第一个 batch 就能收满 4 个非退化组 ⇒ generation batch
+    从实测的 {total} 降到约 {total_steps} 个。省下的比例直接作用在 rollout 阶段上。
+    """
+    timing = summary.get("timing") or {}
+    if not timing.get("available"):
+        return None
+    rollout_key = next(
+        (key for key in ROLLOUT_TIMING_KEYS if key in timing["mean_seconds"]), None
+    )
+    if rollout_key is None:
+        return None
+
+    steps = summary["steps"]["total_steps"]
+    batches_total = summary["generation_batches"]["total"]
+    if not steps or not batches_total:
+        return None
+
+    # 过滤后：每步 1 个 batch 收满（偶尔 2 个），保守按 1.2× 估。
+    filtered_batches = steps * 1.2
+    batch_reduction = max(0.0, 1.0 - filtered_batches / batches_total)
+
+    rollout_seconds = timing["mean_seconds"][rollout_key]
+    step_seconds = timing["step_seconds"]
+    saved_per_step = rollout_seconds * batch_reduction
+    return {
+        "rollout_key": rollout_key,
+        "rollout_seconds_per_step": rollout_seconds,
+        "rollout_share": rollout_seconds / step_seconds if step_seconds else 0.0,
+        "batches_before": batches_total,
+        "batches_after_estimate": filtered_batches,
+        "batch_reduction": batch_reduction,
+        "saved_seconds_per_step": saved_per_step,
+        "saved_share_of_step": saved_per_step / step_seconds if step_seconds else 0.0,
+        "saved_minutes_total": saved_per_step * steps / 60.0,
+        "total_minutes": step_seconds * steps / 60.0,
     }
 
 
@@ -391,6 +484,55 @@ def render(summary: dict, probe: dict | None, max_gen_batches: int | None) -> st
             f"{wasted_batches / max(batches['total'], 1):.0%}",
         ]
 
+    timing = summary.get("timing") or {}
+    saving = summary.get("filter_saving_estimate")
+    if timing.get("available") and timing.get("mean_seconds"):
+        lines += [
+            "",
+            heading("成本结构（veRL 分阶段平均耗时）"),
+            "",
+            f"单步基准：**{timing['step_seconds']:.1f} s**（来源 `{timing.get('step_seconds_source')}`）。",
+            "",
+            "| 阶段 | 平均秒/步 | 占单步 |",
+            "|---|---:|---:|",
+        ]
+        for key, seconds in timing["mean_seconds"].items():
+            share = timing["shares"].get(key)
+            share_text = f"{share:.1%}" if share is not None else "100%"
+            lines.append(f"| `{key}` | {seconds:.1f} | {share_text} |")
+
+        if saving:
+            share = saving["saved_share_of_step"]
+            if share >= 0.15:
+                verdict = "**省时显著（≥15% 单步耗时）⇒ 值得顺带做**"
+            elif share >= 0.08:
+                verdict = "**省时中等（8–15%）⇒ 可做可不做，看你是否愿意多一个活动件**"
+            else:
+                verdict = "**省时有限（<8%）⇒ 不值得为此多引入一个变量**"
+            lines += [
+                "",
+                f"- rollout 阶段 = `{saving['rollout_key']}`，"
+                f"平均 **{saving['rollout_seconds_per_step']:.1f} s/步**，"
+                f"占单步 **{saving['rollout_share']:.1%}**",
+                f"- 过滤到 332 题后 generation batch 从 {saving['batches_before']} 降到约 "
+                f"{saving['batches_after_estimate']:.0f}（省 **{saving['batch_reduction']:.0%}**）",
+                f"- ⇒ 单步约省 **{saving['saved_seconds_per_step']:.1f} s**"
+                f"（{share:.1%}），"
+                f"整轮 {summary['steps']['total_steps']} 步约省 "
+                f"**{saving['saved_minutes_total']:.1f} 分钟**"
+                f"（按 `timing_s/step` 折算的总时长约 {saving['total_minutes']:.0f} 分钟）",
+                "",
+                f"> **判读**：{verdict}。注意这**只是省时间，不改变结果** —— "
+                "每步收满的 4 个非退化组在两种做法下是同一分布。",
+                "> ⚠️ 上面的分母是 `timing_s/step`；若墙钟步长明显更大（动态采样/环境交互"
+                "不计入 `timing_s`），真实省时占比会更低 —— 用进度条自报的 s/it 复核。",
+            ]
+        else:
+            lines += [
+                "",
+                "> ⚠️ 没找到 rollout 阶段的计时键（预期 `timing_s/gen`），无法折算过滤的省时。",
+            ]
+
     metrics = summary.get("optimizer_metrics") or {}
     picked = metrics.get("picked") or {}
     if picked:
@@ -457,9 +599,18 @@ def render(summary: dict, probe: dict | None, max_gen_batches: int | None) -> st
                 + (f"、`pg_clipfrac` 均值 {clip['mean']:.4g}" if clip else "")
                 + " ⇒ 策略几乎没动。**这才是「没提升」的直接原因**，"
                 f"而数据池（实测 kept 率 {groups['kept_rate']:.1%}）是健康的。",
-                "- 结论：**不该改数据集，也不该改采样上限**；该动的是学习信号强度"
+                "- 结论：**不能指望改数据集带来提升** —— 每步收满的 4 个非退化组在"
+                "「过滤池」与「动态采样」下是同一分布。该动的是学习信号强度"
                 "（`lr` ↑ / 步数 ↑ / `n` ↑）。",
             ]
+            if saving:
+                lines.append(
+                    f"- 但过滤训练集**可以省时间**：见「成本结构」—— 整轮约省 "
+                    f"**{saving['saved_minutes_total']:.1f} 分钟**"
+                    f"（{saving['saved_share_of_step']:.1%} 单步耗时）。"
+                    "**省时 ≠ 提分**；这是纯成本优化，要不要做取决于省下的时间"
+                    "是否值得多一个活动件。"
+                )
         else:
             lines.append(
                 f"- `actor/ppo_kl` 均值 {kl['mean']:.4g}，策略确实在动；"
