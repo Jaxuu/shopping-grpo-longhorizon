@@ -180,3 +180,77 @@ def test_aggregate_reports_expected_rates():
     assert report["signal"]["kept_group_rate"] == pytest.approx(0.5)
     assert report["reward"]["reward_type_counts"]["gold_purchase"] == 3
     assert report["reward"]["reward_type_counts"]["repeat_loop"] == 1
+
+
+def make_real_trajectory(
+    task_id: int,
+    *,
+    reward: float,
+    reward_type: str,
+    reward_valid: bool = True,
+    purchased: str | None = "A1",
+) -> dict:
+    """按 `evaluation/rollout.py` **真实写出的形状**构造轨迹。
+
+    reward 字段在嵌套的 `terminal_result["reward_detail"]` 下；
+    顶层只有 `done` / `over` / `reward` / `termination_reason` / `purchase` / `progress`
+    （见 `evaluation/trajectory.py::_terminal_view`）。
+    """
+    trajectory = make_trajectory(task_id, reward=reward, purchased=purchased)
+    trajectory["terminal_result"] = {
+        "done": True,
+        "over": True,
+        "reward": reward,
+        "termination_reason": reward_type,
+        "reward_detail": {
+            "reward_type": reward_type,
+            "termination_reason": reward_type,
+            "reward_valid": reward_valid,
+            "purchase_success": reward_type
+            in {"gold_purchase", "valid_alternative_purchase"},
+        },
+        "purchase": {"asin": purchased} if purchased else None,
+        "progress": {},
+    }
+    return trajectory
+
+
+def test_nested_reward_detail_shape_is_read_correctly():
+    """回归：真实轨迹的 reward 字段是嵌套的 `terminal_result["reward_detail"]`。
+
+    修复前 `_reward_type` 只读顶层 ⇒ 真实探针产物里所有题都被判成 `status == "done"`
+    ⇒ `purchase_success` 恒为 False、`pass_rate` 恒为 0、`reward_unverifiable` 检测失效。
+    """
+    group = [
+        make_real_trajectory(9, reward=1.0, reward_type="gold_purchase"),
+        make_real_trajectory(
+            9, reward=-0.85, reward_type="wrong_purchase", purchased="BAD"
+        ),
+        make_real_trajectory(
+            9, reward=0.25, reward_type="partial_alternative_purchase", purchased="A2"
+        ),
+        make_real_trajectory(
+            9,
+            reward=0.0,
+            reward_type="reward_unverifiable",
+            reward_valid=False,
+            purchased=None,
+        ),
+    ]
+    row = summarize_group(group)
+    assert row["reward_types"] == [
+        "gold_purchase",
+        "wrong_purchase",
+        "partial_alternative_purchase",
+        "reward_unverifiable",
+    ]
+    assert row["purchase_success"] == [True, False, False, False]
+    assert row["drop_reason"] == "sampling_invalid"
+    assert "reward_unverifiable" in row["sampling_invalid_reasons"]
+
+
+def test_flat_terminal_result_still_supported():
+    """扁平夹具（旧测试形状）继续可用，避免破坏既有调用方。"""
+    row = summarize_group([make_trajectory(3), make_trajectory(3, reward=-0.65)])
+    assert row["reward_types"] == ["gold_purchase", "gold_purchase"]
+    assert row["purchase_success"] == [True, True]

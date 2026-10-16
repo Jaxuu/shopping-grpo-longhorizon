@@ -52,11 +52,26 @@ def _purchase_asin(trajectory: Mapping) -> str | None:
     return None
 
 
-def _reward_type(trajectory: Mapping) -> str:
+def _reward_detail(trajectory: Mapping) -> Mapping:
+    """终局 reward 明细。
+
+    真实轨迹（`evaluation/rollout.py` 写出的 `terminal_result`）把 reward 字段放在
+    **嵌套的** `terminal_result["reward_detail"]` 下（见 `evaluation/trajectory.py::_terminal_view`
+    与 `evaluation/metrics.py`）；部分离线夹具把它直接摊平在 `terminal_result` 上。
+    两种都支持，优先取嵌套形式。
+    """
     terminal = trajectory.get("terminal_result") or {}
+    detail = terminal.get("reward_detail")
+    if isinstance(detail, Mapping) and detail:
+        return detail
+    return terminal
+
+
+def _reward_type(trajectory: Mapping) -> str:
+    detail = _reward_detail(trajectory)
     return str(
-        terminal.get("reward_type")
-        or terminal.get("termination_reason")
+        detail.get("reward_type")
+        or detail.get("termination_reason")
         or trajectory.get("status")
         or "unknown"
     )
@@ -68,12 +83,13 @@ def _sampling_invalid_reasons(trajectory: Mapping) -> list[str]:
         reasons.append("error")
     if trajectory.get("release_error"):
         reasons.append("release_error")
-    terminal = trajectory.get("terminal_result") or {}
-    if terminal.get("reward_valid") is False:
+    detail = _reward_detail(trajectory)
+    if detail.get("reward_valid") is False:
         reasons.append("reward_unverifiable")
-    if _reward_type(trajectory) == "reward_unverifiable":
+    reward_type = _reward_type(trajectory)
+    if reward_type == "reward_unverifiable":
         reasons.append("reward_unverifiable")
-    if _reward_type(trajectory) == "infrastructure_invalid":
+    if reward_type == "infrastructure_invalid":
         reasons.append("infrastructure_invalid")
     return sorted(set(reasons))
 
