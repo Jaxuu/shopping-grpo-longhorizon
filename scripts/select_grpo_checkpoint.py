@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import Any
 
 DIAGNOSTICS_NAME = "training_diagnostics.jsonl"
-VAL_PREFIX = "val/"
+# veRL 0.8 的验证指标前缀是 `val-core/` 与 `val-aux/`；保留 `val/` 兼容旧口径。
+VAL_PREFIXES = ("val-core/", "val-aux/", "val/")
 DEFAULT_VAL_SIZE = 49
 DEFAULT_EXPORT_OUTPUT = "outputs/models/grpo-merged"
 
@@ -45,7 +46,9 @@ def _export_target(export_output: Path | None) -> str:
     return DEFAULT_EXPORT_OUTPUT if export_output is None else export_output.as_posix()
 
 # 主指标自动推断顺序：优先"任务成功率"口径，其次 reward 均值。
+# 首位是 veRL 0.8 验证时实际生成的键（agent-loop reward 的 mean@1）。
 PRIMARY_PREFERENCES = (
+    "val-core/shopsimulator/reward/mean@1",
     "val/reward/purchase_success_rate",
     "val/reward/shaped_mean",
     "val/reward/terminal_utility_mean",
@@ -100,7 +103,7 @@ def load_val_metrics(diagnostics: Path) -> dict[int, dict[str, float]]:
                 continue
             values: dict[str, float] = {}
             for key, raw_value in raw_metrics.items():
-                if not isinstance(key, str) or not key.startswith(VAL_PREFIX):
+                if not isinstance(key, str) or not key.startswith(VAL_PREFIXES):
                     continue
                 number = _scalar(raw_value)
                 if number is not None:
@@ -306,7 +309,7 @@ def build_payload(
 def render_metric_list(
     available: dict[str, list[int]], primary: str | None, secondary: str | None
 ) -> str:
-    lines = [f"发现 {len(available)} 个 `val/` 标量指标：", ""]
+    lines = [f"发现 {len(available)} 个验证（`val*`）标量指标：", ""]
     width = max(len(key) for key in available)
     for key in sorted(available):
         steps = available[key]
@@ -376,7 +379,7 @@ def main() -> None:
     per_step = load_val_metrics(diagnostics)
     if not per_step:
         raise SystemExit(
-            f"{diagnostics} 里没有任何带 `{VAL_PREFIX}` 指标的 optimizer_step 记录。\n"
+            f"{diagnostics} 里没有任何带 `{VAL_PREFIXES}` 前缀指标的 optimizer_step 记录。\n"
             "  可能原因：① `trainer.test_freq` 未触发（设成 0 或大于总步数）；"
             "② 训练尚未跑到第一个验证点；③ 该步被 dynamic sampling 跳过（无 optimizer_step）。"
         )
