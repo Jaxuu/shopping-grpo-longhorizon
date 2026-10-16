@@ -7,6 +7,11 @@
   3. n 从 4 提到 8 能救回多少组（同一批轨迹前 n 条配对比较）
   4. 实测每轨迹耗时，用于校准训练预算
 
+M6-R 追加能力（2026-10-16）：`--filter-training-pool` 在**全池**上按每题的组内 reward 方差
+打标签，产出 `difficulty_labels.jsonl` / `filtered_tasks.jsonl` / 可选过滤后 parquet。
+依据：M6 第一轮零结果的根因是训练池里约 91% 的组终局奖励完全相同（零梯度），
+详见 `plans/m6-grpo-runbook.md` §−1 与 §8。
+
 关键设计：走与 GRPO 训练**完全一致**的 rollout 路径
   - system prompt : `rollout.SYSTEM_PROMPT`（与 `data/grpo/train.parquet` 的 system 消息逐字相同）
   - tool schema   : `--tools-config`（默认 `configs/tools.json`，即训练用 schema；
@@ -40,6 +45,24 @@
     python scripts/probe_group_diversity.py \\
         --tasks outputs/probe/t07/tasks.jsonl --out-dir outputs/probe/t10 \\
         --attempts-per-task 8 --temperature 1.0 --top-p 0.9 --workers 8
+
+    # 6) M6-R 重训练前的**全池**探针 + 难度过滤（见 plans/m6-grpo-runbook.md §8）
+    #    训练用 n=4 ⇒ 每题采 4 条，"4 条里 reward 有无差异"就是"该组有无梯度"的定义。
+    python scripts/probe_group_diversity.py --make-task-list 906 \\
+        --out-dir outputs/probe/m6r-full
+    python scripts/probe_group_diversity.py \\
+        --tasks outputs/probe/m6r-full/tasks.jsonl \\
+        --out-dir outputs/probe/m6r-full \\
+        --attempts-per-task 4 --compare-n 4 \\
+        --temperature 0.7 --top-p 0.9 --workers 24 \\
+        --filter-training-pool --filter-n 4 \\
+        --parquet-out outputs/probe/m6r-full/train_filtered.parquet
+
+    # 此命令只生成探针结果与 parquet 副本；绝不改写 data/grpo/train.parquet。
+    # 断点后重跑同一命令会跳过已经完成的 task_id × attempt_index。
+    # 默认不加 --filter-band：核心条件 reward_varying 已等价于"该组有非零 advantage"，
+    # 加带会误杀"4 条都没买成但 shaped 分有差异"的组（它们同样有梯度）。
+    # 想换过滤口径时，直接读 difficulty_labels.jsonl 离线重算，不必重跑探针。
 
 失败处理
 --------
@@ -134,6 +157,41 @@ def parse_args() -> argparse.Namespace:
         help="模拟比较的 n 值，逗号分隔；默认按 --attempts-per-task 自动推导（如 8 → 4,8）",
     )
     parser.add_argument(
+        "--filter-training-pool",
+        action="store_true",
+        help=(
+            "基于每题实际组内 reward 方差输出 difficulty_labels.jsonl 和 "
+            "filtered_tasks.jsonl；不修改源数据"
+        ),
+    )
+    parser.add_argument(
+        "--filter-n",
+        type=int,
+        default=None,
+        help="按每题前 N 个 attempt 评估训练信号；默认取 --compare-n 最大值",
+    )
+    parser.add_argument(
+        "--filter-band",
+        default=None,
+        metavar="LO,HI",
+        help=(
+            "可选的购买成功率附加限制，范围 [0,1]，如 0.125,0.875。"
+            "核心保留条件始终是有效且 reward_varying"
+        ),
+    )
+    parser.add_argument(
+        "--train-parquet",
+        type=Path,
+        default=ROOT / "data/grpo/train.parquet",
+        help="过滤取行的源 parquet（task_id 从 extra_info 列读取）",
+    )
+    parser.add_argument(
+        "--parquet-out",
+        type=Path,
+        default=None,
+        help="写出过滤后的 parquet 副本；绝不覆盖源 parquet（需要 pyarrow）",
+    )
+    parser.add_argument(
         "--max-failure-rate",
         type=float,
         default=0.2,
@@ -208,7 +266,153 @@ def append_jsonl(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def parse_filter_band(raw: str | None) -> tuple[float, float] | None:
+    if raw is None:
+        return None
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) != 2:
+        raise SystemExit("--filter-band 格式应为 LO,HI，例如 0.125,0.875")
+    try:
+        low, high = map(float, parts)
+    except ValueError as exc:
+        raise SystemExit("--filter-band 必须是两个数字") from exc
+    if not (0.0 <= low <= high <= 1.0):
+        raise SystemExit("--filter-band 必须满足 0 ≤ LO ≤ HI ≤ 1")
+    return low, high
+
+
+def build_difficulty_labels(
+    grouped: dict[int, list[dict]],
+    task_ids: list[int],
+    *,
+    filter_n: int,
+    tolerance: float,
+    pass_rate_band: tuple[float, float] | None = None,
+) -> list[dict]:
+    """用 GRPO 的实际组内 reward 方差给全池任务打标签。"""
+    if filter_n < 2:
+        raise ValueError("filter_n 必须至少为 2")
+    if len(set(task_ids)) != len(task_ids):
+        raise ValueError("训练池 task_id 有重复")
+
+    labels = []
+    for task_id in task_ids:
+        items = list(grouped.get(int(task_id), []))
+        items.sort(key=lambda item: int(item.get("attempt_index", 0)))
+        if len(items) < filter_n:
+            labels.append(
+                {
+                    "task_id": int(task_id),
+                    "attempts_observed": len(items),
+                    "filter_n": filter_n,
+                    "eligible": False,
+                    "filter_reason": "insufficient_attempts",
+                }
+            )
+            continue
+        selected = items[:filter_n]
+        attempt_indices = [
+            int(item.get("attempt_index", i)) for i, item in enumerate(selected)
+        ]
+        if len(set(attempt_indices)) != len(attempt_indices):
+            raise ValueError(f"task_id={task_id} 的 attempt_index 重复")
+
+        stats = summarize_group(selected, tolerance=tolerance)
+        successes = sum(bool(value) for value in stats["purchase_success"])
+        pass_rate = successes / filter_n
+        inside_band = (
+            pass_rate_band is None
+            or pass_rate_band[0] <= pass_rate <= pass_rate_band[1]
+        )
+        eligible = bool(stats["kept"]) and inside_band
+        reason = stats["drop_reason"]
+        if stats["kept"] and not inside_band:
+            reason = "outside_pass_rate_band"
+        labels.append(
+            {
+                "task_id": int(task_id),
+                "attempts_observed": len(items),
+                "filter_n": filter_n,
+                "pass_count": successes,
+                "pass_rate": pass_rate,
+                "reward_varying": bool(stats["reward_varying"]),
+                "utility_min": float(stats["utility_min"]),
+                "utility_max": float(stats["utility_max"]),
+                "utility_std": float(stats["utility_std"]),
+                "sampling_invalid_reasons": list(stats["sampling_invalid_reasons"]),
+                "eligible": eligible,
+                "filter_reason": None if eligible else reason,
+            }
+        )
+    return labels
+
+
+def write_filter_outputs(
+    out_dir: Path,
+    labels: list[dict],
+    *,
+    train_parquet: Path,
+    parquet_out: Path | None = None,
+) -> list[int]:
+    """写出任务清单/标签与可选 parquet 子集；源训练池保持只读。"""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    label_path = out_dir / "difficulty_labels.jsonl"
+    task_path = out_dir / "filtered_tasks.jsonl"
+    selected_ids = [int(row["task_id"]) for row in labels if row.get("eligible")]
+    if not selected_ids:
+        raise SystemExit("难度过滤没有保留任何任务；拒绝写出空训练集")
+
+    with label_path.open("w", encoding="utf-8") as handle:
+        for row in labels:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with task_path.open("w", encoding="utf-8") as handle:
+        for task_id in selected_ids:
+            handle.write(json.dumps({"task_id": task_id}, ensure_ascii=False) + "\n")
+
+    if parquet_out is not None:
+        source = Path(train_parquet).expanduser().resolve()
+        target = Path(parquet_out).expanduser().resolve()
+        if source == target:
+            raise SystemExit("parquet-out 不能与 train-parquet 相同；拒绝覆盖源训练集")
+        if not source.is_file():
+            raise SystemExit(f"源 parquet 不存在：{source}")
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise SystemExit("写 parquet 需要 pyarrow；请使用仓库 setup 环境安装") from exc
+
+        table = pq.read_table(source)
+        if "extra_info" not in table.column_names:
+            raise SystemExit("源 parquet 缺少 extra_info 列，无法映射 task_id")
+        extra_info = table.column("extra_info").to_pylist()
+        source_ids = []
+        for row_index, value in enumerate(extra_info):
+            if not isinstance(value, dict) or "task_id" not in value:
+                raise SystemExit(f"源 parquet 第 {row_index} 行 extra_info.task_id 缺失")
+            source_ids.append(int(value["task_id"]))
+        unknown = sorted(set(selected_ids) - set(source_ids))
+        if unknown:
+            raise SystemExit(f"筛选出的 task_id 不在源 parquet 中：{unknown[:20]}")
+        selected = set(selected_ids)
+        mask = pa.array([task_id in selected for task_id in source_ids])
+        filtered = table.filter(mask)
+        if filtered.num_rows == 0:
+            raise SystemExit("过滤后的 parquet 为空；拒绝输出")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(filtered, target)
+        print(f"过滤 parquet：{table.num_rows} → {filtered.num_rows} 行：{target}")
+
+    print(
+        f"难度标签：保留 {len(selected_ids)}/{len(labels)} 题；"
+        f"任务清单：{task_path}；标签：{label_path}"
+    )
+    return selected_ids
+
+
 def training_tool_schemas(path: Path) -> list[dict]:
+
     """取出与 GRPO 训练完全一致的 tool schema。"""
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     entries = raw["tools"] if isinstance(raw, dict) else raw
@@ -428,9 +632,65 @@ def build_report(args: argparse.Namespace) -> dict:
 
     failures = read_jsonl(out_dir / "failures.jsonl")
     grouped = group_trajectories(trajectories)
+    # ThreadPoolExecutor 写回顺序按完成时间；统一按 attempt_index 排序，
+    # 保证 n=4 与 n=8 的比较总是前 4 条 vs 前 8 条。
+    grouped = {
+        task_id: sorted(items, key=lambda item: int(item.get("attempt_index", 0)))
+        for task_id, items in grouped.items()
+    }
     n_values = resolve_compare_n(args)
     full_n = max(n_values)
     usable = {key: value for key, value in grouped.items() if len(value) >= full_n}
+
+    filter_summary = None
+    filter_requested = (
+        args.filter_training_pool
+        or args.filter_band is not None
+        or args.parquet_out is not None
+    )
+    if filter_requested:
+        task_source = args.tasks if args.tasks is not None else args.train_pool
+        task_rows = read_jsonl(task_source)
+        if not task_rows:
+            raise SystemExit(f"难度过滤任务清单为空：{task_source}")
+        task_ids = [int(row["task_id"]) for row in task_rows]
+        filter_n = args.filter_n or full_n
+        if filter_n < 2 or filter_n > int(args.attempts_per_task):
+            raise SystemExit(
+                f"--filter-n 必须在 2 到 --attempts-per-task 之间，当前 {filter_n}"
+            )
+        pass_rate_band = parse_filter_band(args.filter_band)
+        labels = build_difficulty_labels(
+            grouped,
+            task_ids,
+            filter_n=filter_n,
+            tolerance=args.tolerance,
+            pass_rate_band=pass_rate_band,
+        )
+        incomplete = [
+            row["task_id"] for row in labels
+            if row.get("filter_reason") == "insufficient_attempts"
+        ]
+        if incomplete:
+            raise SystemExit(
+                f"全池探针未完整：{len(incomplete)}/{len(labels)} 题未达到 n={filter_n}；"
+                f"例：{incomplete[:20]}。修复失败轨迹后续跑，不生成过滤训练集。"
+            )
+        selected_ids = write_filter_outputs(
+            out_dir,
+            labels,
+            train_parquet=args.train_parquet,
+            parquet_out=args.parquet_out,
+        )
+        filter_summary = {
+            "filter_n": filter_n,
+            "pass_rate_band": pass_rate_band,
+            "eligible_tasks": len(selected_ids),
+            "total_tasks": len(labels),
+            "excluded_tasks": len(labels) - len(selected_ids),
+            "parquet_out": str(args.parquet_out) if args.parquet_out else None,
+        }
+
     if not usable:
         counts = sorted({len(value) for value in grouped.values()})
         hint = (
@@ -480,6 +740,7 @@ def build_report(args: argparse.Namespace) -> dict:
             "tolerance": args.tolerance,
         },
         "n_comparison": compare_n(usable, n_values, tolerance=args.tolerance),
+        "training_pool_filter": filter_summary,
     }
     (out_dir / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -548,6 +809,20 @@ def render_markdown(report: dict) -> str:
             f"- 终局类型计数：{json.dumps(reward['reward_type_counts'], ensure_ascii=False)}",
             "",
         ]
+    filter_summary = report.get("training_pool_filter")
+    if filter_summary:
+        lines += [
+            "## 4. M6 重训练任务过滤",
+            "",
+            f"- 探针组大小 n={filter_summary['filter_n']}；"
+            f"保留 {filter_summary['eligible_tasks']}/{filter_summary['total_tasks']} 题，"
+            f"排除 {filter_summary['excluded_tasks']} 题。",
+            "- 核心规则：无 sampling-invalid 且组内终局 utility 方差大于 tolerance。",
+        ]
+        if filter_summary["pass_rate_band"] is not None:
+            low, high = filter_summary["pass_rate_band"]
+            lines.append(f"- 附加购买成功率范围：[{low:.3f}, {high:.3f}]。")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
