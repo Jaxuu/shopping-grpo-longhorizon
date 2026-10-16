@@ -96,9 +96,18 @@ def analyse(records: list[dict]) -> dict:
     drop_reasons: Counter[str] = Counter()
     per_batch_kept: list[float] = []
     per_batch_groups: list[int] = []
+    step_targets: dict[int, int] = {}
+    step_filled: dict[int, int] = {}
 
     for step, batches in generation_batches.items():
         for batch in batches:
+            target = batch.get("target_prompts")
+            if isinstance(target, int) and target > 0:
+                step_targets[step] = target
+            filled = batch.get("accepted_prompts_after_batch")
+            if isinstance(filled, int):
+                step_filled[step] = max(step_filled.get(step, 0), filled)
+
             groups = batch.get("groups") or []
             if not groups:
                 continue
@@ -116,6 +125,17 @@ def analyse(records: list[dict]) -> dict:
             per_batch_kept.append(batch_kept / len(groups))
 
     batches_per_step = {step: len(batches) for step, batches in generation_batches.items()}
+
+    # 「每步是否收满目标组数」—— 判断"过滤训练集到底有没有信号可捡"的**决定性证据**。
+    # 补丁在每个 generation_batch 里写了 `accepted_prompts_after_batch`（该步累计已收满的
+    # 非退化组数）与 `target_prompts`（= train_batch_size）。若**每一步都收满**，
+    # 说明模型每步都拿到了完整的 4 个非退化组 ⇒ 过滤数据集**不会增加梯度信息**，只省 rollout 成本。
+    target_values = Counter(step_targets.values())
+    target_prompts = target_values.most_common(1)[0][0] if target_values else None
+    comparable_steps = sorted(set(step_filled) & set(step_targets))
+    reached_steps = [s for s in comparable_steps if step_filled[s] >= step_targets[s]]
+    below_steps = [s for s in comparable_steps if step_filled[s] < step_targets[s]]
+    filled_values = [step_filled[s] for s in comparable_steps]
 
     # ⚠️ `skipped_update` 是**重试轮次**，不是「丢掉的一步」：补丁在跳过时 reset 计数后
     # `continue`，只有连续 10 次跳过才会 RuntimeError 中止。所以「总步数」必须按
@@ -139,6 +159,17 @@ def analyse(records: list[dict]) -> dict:
             "steps_skipped_without_any_update": len(retry_only_steps),
             "first_skipped_step": min(skipped_rounds) if skipped_rounds else None,
             "last_skipped_step": max(skipped_rounds) if skipped_rounds else None,
+        },
+        "batch_fill": {
+            "target_prompts": target_prompts,
+            "steps_with_fill_info": len(comparable_steps),
+            "steps_reached_target": len(reached_steps),
+            "steps_below_target": len(below_steps),
+            "below_target_steps": below_steps[:20],
+            "mean_filled_per_step": (
+                statistics.mean(filled_values) if filled_values else 0.0
+            ),
+            "min_filled_per_step": min(filled_values) if filled_values else None,
         },
         "groups": {
             "seen": seen_groups,
@@ -274,6 +305,46 @@ def render(summary: dict, probe: dict | None, max_gen_batches: int | None) -> st
         "> 如果「完全没有任何更新的步」是 0，说明**每一步都产出了梯度**；"
         "重试只浪费 rollout，不损失梯度步。",
         "",
+    ]
+
+    fill = summary.get("batch_fill") or {}
+    if fill.get("steps_with_fill_info"):
+        target = fill["target_prompts"]
+        all_reached = fill["steps_below_target"] == 0
+        lines += [
+            heading("每步是否收满目标组数（判断「过滤训练集有没有信号可捡」）"),
+            "",
+            "> 补丁在每个 `generation_batch` 里记录 `accepted_prompts_after_batch`（该步累计收满的"
+            "非退化组数）与 `target_prompts`（= `train_batch_size`）。这一步直接回答"
+            "**「模型每步到底拿到几个有梯度的组」**。",
+            "",
+            "| 项 | 值 |",
+            "|---|---:|",
+            f"| 每步目标组数（`target_prompts`） | {target} |",
+            f"| 有填充信息的步数 | {fill['steps_with_fill_info']} |",
+            f"| **收满目标的步数** | **{fill['steps_reached_target']}** |",
+            f"| **未收满目标的步数** | **{fill['steps_below_target']}** |",
+            f"| 平均每步收满组数 | {fill['mean_filled_per_step']:.2f} |",
+            f"| 最少收满组数 | {fill['min_filled_per_step']} |",
+            "",
+        ]
+        if all_reached:
+            lines += [
+                f"> ✅ **每一步都收满了 {target} 个非退化组** ⇒ 模型每步拿到的梯度信息"
+                "**已经是完整的**。",
+                "> ⇒ **过滤训练集不会增加任何梯度信息** —— `dynamic_sampling` 本身就是那个过滤器，"
+                "它每步已经只把「有差异的题」喂给优化器。过滤只能省 rollout 成本（占单步耗时约 4%）。",
+                "",
+            ]
+        else:
+            lines += [
+                f"> ⚠️ 有 **{fill['steps_below_target']}** 步**没**收满 {target} 个非退化组"
+                f"（步号：{fill['below_target_steps']}）"
+                "⇒ 这些步的梯度信息确实不完整，此时**扩大池子**或**放宽采样上限**才有意义。",
+                "",
+            ]
+
+    lines += [
         heading("动态采样实测的组级有效率"),
         "",
         "| 项 | 值 |",

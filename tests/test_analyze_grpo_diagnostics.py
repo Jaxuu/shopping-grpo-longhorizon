@@ -20,15 +20,24 @@ def group(kept: bool, accepted: bool = False, reason: str | None = None) -> dict
     return {"uid": "u", "kept": kept, "accepted": accepted, "drop_reason": reason}
 
 
-def generation_batch(step: int, index: int, groups: list[dict]) -> dict:
-    return {
+def generation_batch(
+    step: int,
+    index: int,
+    groups: list[dict],
+    target_prompts: int = 4,
+    accepted_after: int | None = None,
+) -> dict:
+    record = {
         "schema_version": 1,
         "event": "generation_batch",
         "global_step": step,
         "generation_batch": index,
         "groups": groups,
-        "target_prompts": 4,
+        "target_prompts": target_prompts,
     }
+    if accepted_after is not None:
+        record["accepted_prompts_after_batch"] = accepted_after
+    return record
 
 
 def write(path: Path, records: list[dict]) -> Path:
@@ -151,6 +160,61 @@ def test_render_reports_zero_lost_steps_and_points_at_lr(tmp_path):
     assert "0" in text
     assert "lr" in text
     assert "不该改数据集" in text
+
+
+def test_batch_fill_reports_whether_every_step_reached_target(tmp_path):
+    """batch_fill 回答「模型每步到底拿到几个有梯度的组」——过滤数据集有没有信号可捡的决定性证据。"""
+    records = [
+        # step 1：两个 batch 才凑满（第一个 batch 只收到 1 个）
+        generation_batch(1, 1, [group(True, True)] + [group(False)] * 3, accepted_after=1),
+        generation_batch(1, 2, [group(True, True)] * 3 + [group(False)], accepted_after=4),
+        {"event": "optimizer_step", "global_step": 1, "metrics": {}},
+        # step 2：一个 batch 就收满
+        generation_batch(2, 1, [group(True, True)] * 4, accepted_after=4),
+        {"event": "optimizer_step", "global_step": 2, "metrics": {}},
+    ]
+    summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
+    fill = summary["batch_fill"]
+
+    assert fill["target_prompts"] == 4
+    assert fill["steps_with_fill_info"] == 2
+    assert fill["steps_reached_target"] == 2
+    assert fill["steps_below_target"] == 0
+    assert fill["mean_filled_per_step"] == pytest.approx(4.0)
+    assert fill["min_filled_per_step"] == 4
+
+
+def test_batch_fill_flags_steps_that_never_reached_target(tmp_path):
+    """没被收满的步必须被点名 —— 那才是"过滤/扩容才有意义"的场景。"""
+    records = [
+        generation_batch(1, 1, [group(True, True)] + [group(False)] * 3, accepted_after=1),
+        generation_batch(1, 2, [group(False)] * 4, accepted_after=1),
+        {"event": "skipped_update", "global_step": 1, "metrics": {}},
+        generation_batch(2, 1, [group(True, True)] * 4, accepted_after=4),
+        {"event": "optimizer_step", "global_step": 2, "metrics": {}},
+    ]
+    summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
+    fill = summary["batch_fill"]
+
+    assert fill["steps_with_fill_info"] == 2
+    assert fill["steps_reached_target"] == 1
+    assert fill["steps_below_target"] == 1
+    assert fill["below_target_steps"] == [1]
+    assert fill["min_filled_per_step"] == 1
+
+
+def test_batch_fill_is_absent_when_fields_missing(tmp_path):
+    """旧诊断文件没有这两个字段时不能崩，只应报告 0 个可比较步。"""
+    records = [
+        generation_batch(1, 1, [group(True, True)] * 4),
+        {"event": "optimizer_step", "global_step": 1, "metrics": {}},
+    ]
+    # generation_batch 默认带 target_prompts，但这里显式去掉以模拟旧文件
+    for record in records:
+        record.pop("target_prompts", None)
+    summary = analyse(read_records(write(tmp_path / "d.jsonl", records)))
+    assert summary["batch_fill"]["steps_with_fill_info"] == 0
+    assert summary["batch_fill"]["target_prompts"] is None
 
 
 def test_compare_with_probe_computes_rates(tmp_path):
