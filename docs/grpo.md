@@ -77,11 +77,29 @@ Important defaults (see [`configs/grpo.yaml`](../configs/grpo.yaml)):
 
 `train_batch_size` (4), `clip_ratio_high` (0.28), `max_response_length` (16384),
 `rollout.enforce_eager` (true) and `actor.calculate_entropy` (false) are **command-line
-overrides**, not YAML values — the YAML keeps the original author's settings
+overrides**, not YAML values. The YAML keeps the repository's own settings
 (2 / 0.20 / 20480 / unset / true) so that `experiments.json`'s `grpo_baseline` still
 describes the original recipe. Forgetting one of them silently runs a different
 configuration; verify the `command` array in the audit JSON before letting the job
 continue.
+
+Two of those YAML values need a caveat, because "the repository's settings" is not
+always "the settings used for the reported baseline run":
+
+- `actor.calculate_entropy`: the YAML says `true`, but that value was introduced in
+  `2923a34` (2026-08-10) — **after** the reference GRPO result was recorded in
+  `8979f22` (2026-07-29), where the value was `false`, matching veRL 0.8.0's own
+  default (`verl/workers/config/actor.py`: `calculate_entropy: bool = False`).
+  So the `false` override **matches** the reported baseline rather than deviating
+  from it; it is a deviation only from the repository's current YAML.
+- `rollout.enforce_eager` was left unset in the YAML because the original run had no
+  need for it; the override exists purely to stop vLLM from re-capturing CUDA graphs
+  on every weight sync (measured `timing_s/update_weights` 147–198 s → 8 s).
+
+`calculate_entropy` is a **measurement** switch only: `entropy_coeff` is `0`, so
+entropy never enters the loss. Turning it on buys the `actor/entropy` curve (the
+standard early warning for entropy collapse) at the cost of wall-clock and memory —
+see the note below.
 
 Two settings are load-bearing and must stay aligned:
 
