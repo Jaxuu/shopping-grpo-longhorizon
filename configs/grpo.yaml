@@ -51,9 +51,11 @@ actor_rollout_ref:
     fsdp_config:
       optimizer_offload: true
       param_offload: true
-      # 不要加 entropy_from_logits_with_chunking 来救 calculate_entropy：分块只切前向
-      # softmax，而 OOM 在反向（calculate_entropy 强制 inplace_backward=False，多留一份
-      # [tokens, vocab]）。实测见 plans/m6-grpo-runbook.md §8.13，preflight 会拒绝开熵。
+      # 不要加 entropy_from_logits_with_chunking 来救 calculate_entropy：熵的
+      # softmax(logits) 是整块 [tokens, 248320] bf16（≈12.2 GiB），autograd 会保存它
+      # 直到 backward；分块只切前向循环，救不了这份驻留（torch.compile 还可能把
+      # 分块融合回整块）。实测：第 6 步 loss.backward() 要 12.47 GiB，已用 78.52 GiB。
+      # 详见 plans/m6-grpo-runbook.md §8.13；preflight 会直接拒绝开熵。
   rollout:
     name: vllm
     mode: async

@@ -352,12 +352,13 @@ def validate_entropy_memory_guard(actor) -> None:
        日志为空）。另一条路径 `_update_actor` 虽然读这个开关，但 `entropy_coeff=0`
        ⇒ 算出的熵只进 `actor/entropy_loss`（恒 0）。要熵曲线只能 `bypass_mode=false`。
 
-    ② **它必然 OOM。** `calculate_entropy` 强制 `inplace_backward = False`
-       （`verl/workers/engine/fsdp/transformer_impl.py`），logprob 的反向因此多留
-       一份 `[tokens, vocab]` 直到反向结束。⚠️ **`entropy_from_logits_with_chunking`
-       救不了这一点**：它只把前向 `softmax` 切成 2048 行一块，压的是前向临时量，
-       而 OOM 发生在**反向**，那一份驻留与 chunking 无关。上一版守卫要求"开了熵
-       就必须开 chunking"正是这个错误假设，已按实测废弃。
+    ② **它必然 OOM。** 熵的 `softmax(logits)` 是整块 `[tokens, vocab]` bf16
+       （`24576 × 248320 × 2 B = 12.21 GiB`），autograd 保存它直到 backward 结束。
+       ⚠️ **`entropy_from_logits_with_chunking` 救不了这一点**：它只把前向 `softmax`
+       切成 2048 行一块，压的是前向临时量；而 autograd 保存的那份驻留与 chunking 无关，
+       且它被 `torch.compile(dynamic=True)` 包裹（`use_torch_compile` 默认 `True`），
+       分块还可能被图优化融合回整块。上一版守卫要求"开了熵就必须开 chunking"
+       正是这个错误假设，已按实测废弃。
 
     ⇒ 唯一正确做法是 `calculate_entropy=false`（本仓库的 YAML 值是作者后加的
     `true`，所以用 CLI override 关掉，见 `docs/grpo.md`）。
@@ -370,11 +371,11 @@ def validate_entropy_memory_guard(actor) -> None:
     raise SystemExit(
         "calculate_entropy=true is rejected: it produces no metric in this repository "
         "(algorithm.rollout_correction.bypass_mode=true skips _compute_old_log_prob, the "
-        "only producer of actor/entropy) and it OOMs in backward because it forces "
-        "inplace_backward=False, leaving an extra [tokens, vocab] resident "
-        f"(entropy_from_logits_with_chunking={chunking} only bounds the forward softmax "
-        "and cannot help the backward). Measured 2026-10-17: 12.47 GiB allocation failed "
-        "at loss.backward() with 78.52 GiB already allocated. "
+        "only producer of actor/entropy) and it OOMs in backward: the full-token "
+        "softmax(logits) tensor ([tokens, vocab] bf16, ~12.2 GiB at vocab=248320) is kept "
+        f"by autograd until backward ends (entropy_from_logits_with_chunking={chunking} "
+        "only bounds the forward softmax and cannot help). Measured 2026-10-17: 12.47 GiB "
+        "allocation failed at loss.backward() with 78.52 GiB already allocated. "
         "Set actor_rollout_ref.actor.calculate_entropy=false."
     )
 

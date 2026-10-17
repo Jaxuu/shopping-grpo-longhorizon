@@ -5,8 +5,8 @@ where the composed-config tests cannot.
 
 **2026-10-17 行为变更**：守卫原先只拒绝「开了熵但没开
 `entropy_from_logits_with_chunking`」。M6-R 第 6 步实测 OOM（`loss.backward()`
-尝试分配 12.47 GiB）证明分块救不了反向的那份 `[tokens, vocab]` 驻留
-（`calculate_entropy` 强制 `inplace_backward=False`）。现在只要开了熵就拒绝。
+尝试分配 12.47 GiB）证明分块救不了 autograd 保存的那份整块
+`softmax(logits)`（`[tokens, vocab]` bf16 ≈12.2 GiB）。现在只要开了熵就拒绝。
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class EntropyMemoryGuardTest(unittest.TestCase):
             validate_entropy_memory_guard(_actor(True))
 
     def test_rejection_explains_the_backward_oom(self):
-        with self.assertRaisesRegex(SystemExit, "inplace_backward"):
+        with self.assertRaisesRegex(SystemExit, "softmax"):
             validate_entropy_memory_guard(_actor(True))
 
     def test_rejection_names_the_fix(self):
