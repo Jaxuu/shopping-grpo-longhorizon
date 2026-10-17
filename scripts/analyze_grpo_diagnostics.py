@@ -214,6 +214,11 @@ INTERESTING_METRICS = (
     "critic/score/mean",
 )
 
+# `timing_s/` 前缀下混有「不是秒」的键：veRL 把最慢请求的 token 长度也记在这里。
+# 实测 `timing_s/agent_loop/slowest/response_length` = 6270.8（token 数，不是 6270 秒），
+# 当成秒会得出 4729% 的单步占比，并让 `max(分项)` 兜底把单步秒数算成 6270.8。
+NON_DURATION_SUFFIXES = ("/response_length", "/prompt_length")
+
 
 def summarize_metrics(per_step: dict[int, dict]) -> dict:
     """对 optimizer_step 的数值指标做首/末/极值/均值汇总（只看关心的键）。"""
@@ -256,11 +261,19 @@ def summarize_timing(per_step: dict[int, dict]) -> dict:
     用途：回答"过滤训练集到底能省多少墙钟"。补丁把 optimizer_step 的完整 metrics
     落盘，veRL 的 `timing_s/gen`（rollout）、`timing_s/update_actor`、`timing_s/step`
     等都在里面，所以不需要额外埋点。
+
+    ⚠️ **不是所有 `timing_s/` 键都是秒**：veRL 把「最慢那条轨迹的 token 长度」也记在
+    这个前缀下（`timing_s/agent_loop/slowest/response_length`、
+    `.../slowest/prompt_length`）。实测 `response_length` 是 6270.8（= token 数），
+    若当成秒会算出 4729% 的单步占比，并且会污染 `step_seconds` 的 `max(分项)` 兜底。
+    所以按后缀显式排除（见 `NON_DURATION_SUFFIXES`）。
     """
     series: dict[str, list[float]] = defaultdict(list)
     for step in sorted(per_step):
         for key, value in (per_step[step] or {}).items():
             if not str(key).startswith("timing_s/"):
+                continue
+            if str(key).endswith(NON_DURATION_SUFFIXES):
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue

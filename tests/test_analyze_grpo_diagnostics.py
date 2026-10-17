@@ -272,6 +272,45 @@ def test_summarize_timing_falls_back_when_step_key_missing():
     assert "max(" in timing["step_seconds_source"]
 
 
+def test_summarize_timing_ignores_token_length_keys():
+    """`timing_s/agent_loop/slowest/response_length` 是 token 数，不是秒。
+
+    M6-R 第 5 步的真实数据里它是 6270.8，被当成秒会得出 4729% 的单步占比。
+    """
+    per_step = {
+        1: {
+            "timing_s/step": 132.6,
+            "timing_s/gen": 15.8,
+            "timing_s/update_actor": 108.4,
+            "timing_s/agent_loop/slowest/response_length": 6270.8,
+            "timing_s/agent_loop/slowest/prompt_length": 1856.6,
+        },
+    }
+    timing = summarize_timing(per_step)
+
+    assert "timing_s/agent_loop/slowest/response_length" not in timing["mean_seconds"]
+    assert "timing_s/agent_loop/slowest/prompt_length" not in timing["mean_seconds"]
+    assert timing["step_seconds"] == pytest.approx(132.6)
+    # 所有占比都必须 ≤ 1（此前 response_length 会算出 47.3 倍）
+    assert max(timing["shares"].values()) <= 1.0
+    assert timing["shares"]["timing_s/gen"] == pytest.approx(15.8 / 132.6)
+
+
+def test_summarize_timing_fallback_not_polluted_by_token_length():
+    """兜底分支同样不能被 token 长度污染：否则单步秒数会被算成 6270.8。"""
+    timing = summarize_timing(
+        {
+            1: {
+                "timing_s/gen": 15.8,
+                "timing_s/update_actor": 108.4,
+                "timing_s/agent_loop/slowest/response_length": 6270.8,
+            },
+        }
+    )
+    assert timing["step_seconds"] == pytest.approx(108.4)
+    assert "response_length" not in timing["step_seconds_source"]
+
+
 def test_estimate_filter_saving_uses_measured_batches_and_rollout_share(tmp_path):
     """过滤省时估算 = rollout 平均耗时 × generation batch 的下降比例。"""
     records = []
