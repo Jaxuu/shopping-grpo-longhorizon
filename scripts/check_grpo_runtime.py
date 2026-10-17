@@ -329,31 +329,54 @@ def ppo_gradient_accumulation_steps(mini_batch_size: int, micro_batch_size: int)
 
 
 def validate_entropy_memory_guard(actor) -> None:
-    """拒绝「开了熵测量但没开分块」的配置，否则长轨迹步会 OOM。
+    """拒绝 `calculate_entropy=true`：在本仓库它既不产出指标，又必然 OOM。
 
-    `calculate_entropy=true` 的两处额外开销都随「响应长度 × 词表」线性增长：
-    ① 熵前向 `softmax(logits, -1)` 与 `sum(pd * logits, -1)` 各物化一个
-    `[tokens, vocab]` fp32 临时量；② 它会强制 `inplace_backward = False`
-    （`verl/workers/engine/fsdp/transformer_impl.py`），使 logprob 的反向多留一份
-    `[tokens, vocab]` 直到反向结束。按 vocab=248320、`max_response_length=16384`
-    估算，边际峰值 ≈23 GB，叠加第一轮实测 `max_memory_reserved` 58.8 GB 会越过 84 GB
-    卡。`entropy_from_logits_with_chunking` 把 softmax 切成 2048 行一块，峰值变成有界
-    的 ≈6 GB（逐行 softmax，数值等价）。
+    **2026-10-17 实测（M6-R 第 6 步，`outputs/logs/m6r-train.log`）**：
 
-    生效路径是 `actor.fsdp_config.entropy_from_logits_with_chunking`：
-    `engine_workers.py` 传给 FSDPEngine 的是 `actor_config.engine`，而
-    `FSDPActorConfig.__post_init__` 把它指向 `fsdp_config`，并**不**把同名的
-    `actor.entropy_from_logits_with_chunking` 同步过去（那个字段不生效）。
+        torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.47 GiB.
+        GPU 0 has a total capacity of 83.05 GiB of which 2.21 GiB is free.
+        Of the allocated memory 78.52 GiB is allocated by PyTorch,
+        and 353.36 MiB is reserved by PyTorch but unallocated.
+
+    死在 `loss.backward()`。`12.47 GiB` 恰好是 `24576 × 248320 × 2 B = 12.2 GiB`，
+    即一个 `[ppo_max_token_len_per_gpu, vocab]` 的 bf16 张量；`reserved but
+    unallocated` 只有 353 MiB ⇒ 不是碎片，是真的用满。
+
+    两条独立的理由，任何一条都足以拒绝：
+
+    ① **它在本仓库不产出任何指标。** `actor/entropy` 的唯一来源是
+       `_compute_old_log_prob` 返回的 `entropys`（`verl/trainer/ppo/ray_trainer.py`，
+       该指标写在 `else: # Recompute old_log_probs` 分支里）。本仓库
+       `algorithm.rollout_correction.bypass_mode=true` ⇒ 走 `apply_bypass_mode`，
+       **跳过整个 `_compute_old_log_prob`** ⇒ `actor/entropy` 永不出现（实测 grep
+       日志为空）。另一条路径 `_update_actor` 虽然读这个开关，但 `entropy_coeff=0`
+       ⇒ 算出的熵只进 `actor/entropy_loss`（恒 0）。要熵曲线只能 `bypass_mode=false`。
+
+    ② **它必然 OOM。** `calculate_entropy` 强制 `inplace_backward = False`
+       （`verl/workers/engine/fsdp/transformer_impl.py`），logprob 的反向因此多留
+       一份 `[tokens, vocab]` 直到反向结束。⚠️ **`entropy_from_logits_with_chunking`
+       救不了这一点**：它只把前向 `softmax` 切成 2048 行一块，压的是前向临时量，
+       而 OOM 发生在**反向**，那一份驻留与 chunking 无关。上一版守卫要求"开了熵
+       就必须开 chunking"正是这个错误假设，已按实测废弃。
+
+    ⇒ 唯一正确做法是 `calculate_entropy=false`（本仓库的 YAML 值是作者后加的
+    `true`，所以用 CLI override 关掉，见 `docs/grpo.md`）。
     """
     if not bool(actor.calculate_entropy):
         return
-    if not bool(actor.fsdp_config.entropy_from_logits_with_chunking):
-        raise SystemExit(
-            "calculate_entropy=true requires bounded entropy computation; set "
-            "actor_rollout_ref.actor.fsdp_config.entropy_from_logits_with_chunking=true "
-            "(the same-named flag directly under actor_rollout_ref.actor is ignored by "
-            "the FSDP engine, so it will not help)"
-        )
+    chunking = bool(
+        getattr(getattr(actor, "fsdp_config", None), "entropy_from_logits_with_chunking", False)
+    )
+    raise SystemExit(
+        "calculate_entropy=true is rejected: it produces no metric in this repository "
+        "(algorithm.rollout_correction.bypass_mode=true skips _compute_old_log_prob, the "
+        "only producer of actor/entropy) and it OOMs in backward because it forces "
+        "inplace_backward=False, leaving an extra [tokens, vocab] resident "
+        f"(entropy_from_logits_with_chunking={chunking} only bounds the forward softmax "
+        "and cannot help the backward). Measured 2026-10-17: 12.47 GiB allocation failed "
+        "at loss.backward() with 78.52 GiB already allocated. "
+        "Set actor_rollout_ref.actor.calculate_entropy=false."
+    )
 
 
 def validate_training_memory_budget(config):

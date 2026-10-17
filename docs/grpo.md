@@ -96,9 +96,17 @@ One YAML value needs a caveat, because "the repository's settings" is not always
   on every weight sync (measured `timing_s/update_weights` 147–198 s → 8 s).
 
 `calculate_entropy` is a **measurement** switch only: `entropy_coeff` is `0`, so
-entropy never enters the loss. It buys the `actor/entropy` curve (the standard early
-warning for entropy collapse) at the cost of wall-clock (~15–30% of `update_actor`)
-and memory. That memory cost is why the YAML pairs it with
+entropy never enters the loss. **But in this repository it buys nothing**, because
+`algorithm.rollout_correction.bypass_mode` is `true`: the trainer sets
+`old_log_probs = rollout_log_probs` and skips `_compute_old_log_prob` entirely, which
+is the only producer of the `entropys` tensor behind the `actor/entropy` metric
+(`verl/trainer/ppo/ray_trainer.py`, the `actor/entropy` line lives in the
+`else: # Recompute old_log_probs` branch). So `actor/entropy` **never appears in the
+logs**, whether `calculate_entropy` is on or off — turning it on only pays the cost.
+To actually get the entropy curve you must set `bypass_mode: false`, which is an
+algorithmic change, not a measurement one.
+
+That memory cost is why the YAML pairs it with
 `actor.fsdp_config.entropy_from_logits_with_chunking: true`, and why
 [`scripts/check_grpo_runtime.py`](../scripts/check_grpo_runtime.py) refuses to start
 when `calculate_entropy` is on without it:
