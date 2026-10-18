@@ -136,5 +136,22 @@
     "process_evidence_version": "shopping-process-evidence-v1",
     "upgraded_at": "2026-10-13",
     "note": "M3/R11：池判定仍以 admission 块（v3 时代 verdicts）为准；Reward 运行时已升至 v4，双层口径接受 v3+v4。"
+  },
+  "reward_v5": {
+    "reward_version": "shopsimulator-reward-v5",
+    "supported_reward_versions": [
+      "shopsimulator-reward-v3",
+      "shopsimulator-reward-v4",
+      "shopsimulator-reward-v5"
+    ],
+    "reward_py_sha256": "c1c47dfe794fb8f8d88967d08b26be5323049b8e329f79d1ac28df32a83ab1f9",
+    "wrong_purchase_shaping": {
+      "axis": "match_score * min(1, required/actual)",
+      "base": -0.85,
+      "scale": 0.2,
+      "cap": -0.66
+    },
+    "upgraded_at": "2026-10-18",
+    "note": "M7：只改 wrong_purchase 的数值分支（band [-0.85, -0.66]），reward_type / hard gate / purchase_success 不变。池内容与 admission 判定均未改动，reward_v4 块保留为建池溯源。"
   }
 }

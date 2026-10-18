@@ -5,9 +5,10 @@ from collections import Counter
 
 REWARD_V3 = "shopsimulator-reward-v3"
 REWARD_V4 = "shopsimulator-reward-v4"
-# 双层口径：v3（历史可比）与 v4（改进口径）都被判定为有效 Reward；
-# 报告层（M7-5）负责把两者分表呈现，本模块只做接受性判定。
-SUPPORTED_REWARD_VERSIONS = (REWARD_V3, REWARD_V4)
+REWARD_V5 = "shopsimulator-reward-v5"
+# 三层口径：v3（历史可比）、v4（解析覆盖）与 v5（wrong_purchase band）都被判定为
+# 有效 Reward；报告层（M7-5）负责把三者分表呈现，本模块只做接受性判定。
+SUPPORTED_REWARD_VERSIONS = (REWARD_V3, REWARD_V4, REWARD_V5)
 REWARD_CONTRACT = "+".join(SUPPORTED_REWARD_VERSIONS)
 REWARD_V3_TYPES = (
     "gold_purchase",

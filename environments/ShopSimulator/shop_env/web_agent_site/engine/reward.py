@@ -36,10 +36,16 @@ from web_agent_site.engine.variant_price import (
 # layers (soft price proximity, process evidence). The hard-gate semantics
 # (``category`` + ``budget``, strict ``actual <= upper``) are byte-for-byte
 # the v3 semantics; see docs/reward-v4.md for the 修 bug / 改标准 split.
-REWARD_VERSION = "shopsimulator-reward-v4"
+#
+# Reward v5 = one numeric branch only: ``wrong_purchase`` stops being the
+# constant -0.85 and becomes a soft band driven by ``match_score x budget
+# proximity`` (see docs/reward-v5.md). Classification, hard gates,
+# ``purchase_success`` and ``reward_valid`` are untouched.
+REWARD_VERSION = "shopsimulator-reward-v5"
 SUPPORTED_REWARD_VERSIONS = (
     "shopsimulator-reward-v3",
     "shopsimulator-reward-v4",
+    "shopsimulator-reward-v5",
 )
 PROCESS_EVIDENCE_VERSION = "shopping-process-evidence-v1"
 DIMENSION_WEIGHTS = {
@@ -58,7 +64,13 @@ DEFAULT_REWARDS = {
     "early_abstain": -0.35,
     "max_steps": -0.50,
     "repeat_loop": -0.65,
+    # v5: wrong_purchase 由常数改为 band [base, cap]。`wrong_purchase` 保留为
+    # driver = 0 时的退化值（与 v4 逐字节一致），因此它仍是该档的**地板**。
+    # cap 必须严格低于 repeat_loop(-0.65)，否则「买错」会好于「循环/步数耗尽」。
     "wrong_purchase": -0.85,
+    "wrong_purchase_base": -0.85,
+    "wrong_purchase_scale": 0.20,
+    "wrong_purchase_cap": -0.66,
     "reward_unverifiable": 0.0,
 }
 KNOWN_ACCEPTABLE_MATCH_THRESHOLD = 0.70
@@ -155,6 +167,33 @@ def _price_gate(price_resolution: object, goal: dict) -> dict:
         source_field="variant_price",
         evidence=price_resolution,
     )
+
+
+def _budget_proximity(budget_gate: dict) -> float:
+    """Reward v5 shaping axis: ``min(1, required / actual)``.
+
+    Only the *numeric* terminal reward consumes this value; the hard gate
+    status, ``reward_type`` and ``purchase_success`` are unaffected.
+
+    * Budget gate PASS ⇒ ``required / actual >= 1`` is clipped to 1.0, so the
+      factor is neutral.
+    * Budget not declared (``required is None``) ⇒ 1.0, which degenerates the
+      band to a pure ``match_score`` axis.
+    * Unverifiable / non-finite inputs ⇒ 1.0 (neutral, never a penalty).
+    """
+    try:
+        required = float(budget_gate.get("required"))
+        actual = float(budget_gate.get("actual"))
+    except (AttributeError, TypeError, ValueError):
+        return 1.0
+    if (
+        not math.isfinite(required)
+        or not math.isfinite(actual)
+        or required <= 0
+        or actual <= 0
+    ):
+        return 1.0
+    return min(1.0, required / actual)
 
 
 def _brand_gate(expected: str, product: dict) -> dict:
@@ -469,7 +508,16 @@ def evaluate_purchase(
     elif hard_failed:
         reward_type = "wrong_purchase"
         reward_valid = True
-        reward = values[reward_type]
+        # v5: 档位内 soft 排序。driver = 0 时与 v4 的常数 -0.85 完全一致；
+        # cap 保证该档仍严格低于 repeat_loop / max_steps。
+        driver = preferences["match_score"] * _budget_proximity(
+            hard_gates["budget"]
+        )
+        reward = min(
+            values["wrong_purchase_cap"],
+            values["wrong_purchase_base"]
+            + values["wrong_purchase_scale"] * driver,
+        )
     elif preferences["all_satisfied"]:
         reward_type = (
             "gold_purchase" if asin_match else "valid_alternative_purchase"

@@ -11,10 +11,11 @@ from collections.abc import Mapping
 
 current_environment: ContextVar = ContextVar("shopsimulator_environment", default=None)
 current_runtime_state: ContextVar = ContextVar("shopsimulator_runtime_state", default=None)
-# 双层口径（R11 闭合）：历史 v3 轨迹与新 v4 终局都被接受。
+# 三层口径（R11 闭合）：历史 v3/v4 轨迹与新 v5 终局都被接受。
 SUPPORTED_REWARD_VERSIONS = (
     "shopsimulator-reward-v3",
     "shopsimulator-reward-v4",
+    "shopsimulator-reward-v5",
 )
 REWARD_V3_TYPES = {
     "gold_purchase",

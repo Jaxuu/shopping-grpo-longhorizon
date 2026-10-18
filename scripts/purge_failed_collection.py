@@ -22,7 +22,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-VALID_REWARD_VERSIONS = {"shopsimulator-reward-v3", "shopsimulator-reward-v4"}
+VALID_REWARD_VERSIONS = {
+    "shopsimulator-reward-v3",
+    "shopsimulator-reward-v4",
+    "shopsimulator-reward-v5",
+}
 
 
 def is_infrastructure_failed(row: dict) -> tuple[bool, list[str]]:

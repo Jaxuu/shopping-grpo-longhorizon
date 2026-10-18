@@ -1,5 +1,8 @@
 # Reward v4 变更说明（M3）
 
+> **后续版本**：v5（M7）把 `wrong_purchase` 从常数 −0.85 改为 band `[−0.85, −0.66]`，
+> 判定逻辑与本文全部不变。见 `docs/reward-v5.md`。
+>
 > 配套：`plans/task.md` §M3、`plans/optimize.md` §M3、`audit/reward-v4-hashes.txt`（冻结哈希）。
 > 版本标识：`shopsimulator-reward-v3` → `shopsimulator-reward-v4`（P2）。预算解析器：`shopping-budget-parser-v4`（M1-R 已落地，本轮未改动行为）。
 

@@ -11,6 +11,7 @@ from shopping_grpo.environment.actions import action_reject_reason
 from shopping_grpo.environment.tools import tool_call_to_action
 from shopping_grpo.environment.observation import render_structured_observation
 from shopping_grpo.training.grpo.adapter.runtime import (
+    SUPPORTED_REWARD_VERSIONS,
     current_environment,
     current_runtime_state,
     record_action_attempt,
@@ -130,7 +131,7 @@ class ShopSimulatorTool(BaseTool):
                 if (
                     isinstance(reward_detail, dict)
                     and reward_detail.get("reward_version")
-                    in {"shopsimulator-reward-v3", "shopsimulator-reward-v4"}
+                    in SUPPORTED_REWARD_VERSIONS
                 ):
                     try:
                         public_detail = validate_reward(reward_detail)

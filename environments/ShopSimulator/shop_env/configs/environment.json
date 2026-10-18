@@ -15,7 +15,7 @@
     }
   },
   "reward": {
-    "version": "shopsimulator-reward-v4",
+    "version": "shopsimulator-reward-v5",
     "gold_purchase": 1.0,
     "valid_alternative_purchase": 0.55,
     "partial_purchase_base": -0.3,
@@ -26,6 +26,9 @@
     "max_steps": -0.5,
     "repeat_loop": -0.65,
     "wrong_purchase": -0.85,
+    "wrong_purchase_base": -0.85,
+    "wrong_purchase_scale": 0.2,
+    "wrong_purchase_cap": -0.66,
     "reward_unverifiable": 0.0
   },
   "termination": {

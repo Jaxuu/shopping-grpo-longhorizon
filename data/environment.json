@@ -16,8 +16,11 @@
     "repeat_loop": -0.65,
     "reward_unverifiable": 0.0,
     "valid_alternative_purchase": 0.55,
-    "version": "shopsimulator-reward-v4",
-    "wrong_purchase": -0.85
+    "version": "shopsimulator-reward-v5",
+    "wrong_purchase": -0.85,
+    "wrong_purchase_base": -0.85,
+    "wrong_purchase_cap": -0.66,
+    "wrong_purchase_scale": 0.2
   },
   "search": {
     "field_weights": {
@@ -37,7 +40,7 @@
   "runtime_files_sha256": {
     "observation.py": "adabdf0109b8a0f592148c098e44065913ce6c699230047239d8809f412bf998",
     "pack_api.py": "d491f2620c60c115547f330a2e0c131b2796779b718d02cb5318b1bedfe5aadc",
-    "reward.py": "ba85b77886144b3ea80f681aa064a91d2e7b499380f5e433098ffa38fc9316e0",
+    "reward.py": "c1c47dfe794fb8f8d88967d08b26be5323049b8e329f79d1ac28df32a83ab1f9",
     "slot_lease_pool.py": "5be40275eebbed6735196a1dea4581ce707558e247d23d0de4d98907772a0420",
     "web_agent_text_env.py": "d6db15f282849847a364d8d36af0eed113c1c97184a1ded98eb1fd29dab577d1"
   },

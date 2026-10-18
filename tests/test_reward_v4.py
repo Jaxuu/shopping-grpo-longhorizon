@@ -74,14 +74,18 @@ def _minimal_product(**overrides):
 
 
 class RewardVersionTest(unittest.TestCase):
-    """M3-8 / R11: the runtime emits v4 while still accepting v3."""
+    """M3-8 / R11: v4 是历史口径，必须继续可读（当前运行时为 v5）。"""
 
-    def test_reward_version_is_v4(self):
-        self.assertEqual(REWARD_VERSION, "shopsimulator-reward-v4")
+    def test_v4_remains_readable(self):
+        self.assertIn(
+            "shopsimulator-reward-v4",
+            SUPPORTED_REWARD_VERSIONS,
+            "三层口径：v4 轨迹必须仍可读（运行时已升级到 v5）",
+        )
         self.assertIn(
             "shopsimulator-reward-v3",
             SUPPORTED_REWARD_VERSIONS,
-            "双层口径：旧 v3 轨迹必须仍可读",
+            "三层口径：旧 v3 轨迹必须仍可读",
         )
 
     def test_reward_payload_carries_v4_version(self):
@@ -366,7 +370,8 @@ class ConsumerDualAcceptanceTest(unittest.TestCase):
             finally:
                 Path(path).unlink(missing_ok=True)
 
-    def test_frozen_environment_json_is_v4(self):
+    def test_frozen_environment_json_matches_runtime(self):
+        """两个冻结 manifest 必须与运行时 `REWARD_VERSION` 同步（当前为 v5）。"""
         import json
 
         for relative in (
@@ -376,7 +381,7 @@ class ConsumerDualAcceptanceTest(unittest.TestCase):
             payload = json.loads((ROOT / relative).read_text(encoding="utf-8"))
             self.assertEqual(
                 payload["reward"]["version"],
-                "shopsimulator-reward-v4",
+                REWARD_VERSION,
                 relative,
             )
 

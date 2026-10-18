@@ -79,6 +79,27 @@ class RewardV3Test(unittest.TestCase):
             DEFAULT_REWARDS["repeat_loop"],
             DEFAULT_REWARDS["wrong_purchase"],
         )
+        # Reward v5：wrong_purchase 变成 band [base, cap]，但**最高分**必须仍低于
+        # repeat_loop 与 max_steps，否则「买错」会好于「循环/步数耗尽」——
+        # 正是本条测试要防止的恐慌性购买。
+        self.assertLess(
+            DEFAULT_REWARDS["wrong_purchase_cap"],
+            DEFAULT_REWARDS["repeat_loop"],
+        )
+        self.assertLess(
+            DEFAULT_REWARDS["wrong_purchase_cap"],
+            DEFAULT_REWARDS["max_steps"],
+        )
+        self.assertEqual(
+            DEFAULT_REWARDS["wrong_purchase_base"],
+            DEFAULT_REWARDS["wrong_purchase"],
+            "v5 的 band 地板必须与 v4 常数一致（driver=0 时逐字节不变）",
+        )
+        self.assertGreater(DEFAULT_REWARDS["wrong_purchase_scale"], 0.0)
+        self.assertGreater(
+            DEFAULT_REWARDS["wrong_purchase_cap"],
+            DEFAULT_REWARDS["wrong_purchase_base"],
+        )
 
     def test_gold_and_full_alternative_have_a_large_jump(self):
         selected = {"颜色分类": "白色", "尺码": "XL"}
@@ -173,7 +194,15 @@ class RewardV3Test(unittest.TestCase):
         )
         self.assertEqual(wrong_category.reward_type, "wrong_purchase")
         self.assertEqual(over_budget.reward_type, "wrong_purchase")
-        self.assertEqual(over_budget.reward, -0.85)
+        # Reward v5：匹配度满分但超预算 ⇒ 落在 band 内，严格高于 v4 的常数 -0.85，
+        # 但永不越过 cap（−0.66），因此仍是最差档。
+        self.assertEqual(over_budget.weighted_score, 1.0)
+        self.assertGreater(
+            over_budget.reward, DEFAULT_REWARDS["wrong_purchase_base"]
+        )
+        self.assertLessEqual(
+            over_budget.reward, DEFAULT_REWARDS["wrong_purchase_cap"]
+        )
 
     def test_missing_user_budget_does_not_invent_an_upper_bound(self):
         no_budget_goal = goal()

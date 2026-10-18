@@ -20,8 +20,9 @@ from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE
 DETERMINISTIC_METRICS_VERSION = "shopping-deterministic-metrics-v1"
 REWARD_V3 = "shopsimulator-reward-v3"
 REWARD_V4 = "shopsimulator-reward-v4"
-# 双层口径（M7-5 依赖）：历史 v3 轨迹与 v4 轨迹都参与判定，报告层负责分表。
-SUPPORTED_REWARD_VERSIONS = (REWARD_V3, REWARD_V4)
+REWARD_V5 = "shopsimulator-reward-v5"
+# 三层口径（M7 依赖）：历史 v3/v4 轨迹与新 v5 轨迹都参与判定，报告层负责分表。
+SUPPORTED_REWARD_VERSIONS = (REWARD_V3, REWARD_V4, REWARD_V5)
 _ASIN = re.compile(rf"(?<!\d){PRODUCT_ID_CAPTURE}(?!\d)")
 _INFRASTRUCTURE_ERROR_TYPES = {
     "ContextBudgetError",

@@ -1,0 +1,21 @@
+# Reward v5 冻结哈希（2026-10-18，M7）
+# 口径：SHA-256 over **LF 归一化**后的文件内容（与 data/environment.json 的
+#       runtime_files_sha256 和 tests/test_environment_manifest.py::lf_sha256 一致）。
+# 注意：同目录的 reward-v4-hashes.txt 是在 Windows CRLF 检出上按**原始字节**算的，
+#       因此未改动的文件（constraints.py / reward_features.py / config.py / rubric.py）
+#       在本文件里也是不同的值——那是换行符差异，不是内容变更。以本文件为准。
+c1c47dfe794fb8f8d88967d08b26be5323049b8e329f79d1ac28df32a83ab1f9  environments/ShopSimulator/shop_env/web_agent_site/engine/reward.py
+0acc3eec6dfd474aa2f6acac4c92b01d1ad4afdb608a1b81e19b6f5e27db2c39  environments/ShopSimulator/shop_env/web_agent_site/engine/constraints.py
+3f416bf5d32ce2cd57dd10b0ab0939a5869c96ca67dab17ad3ba243584373c30  environments/ShopSimulator/shop_env/web_agent_site/engine/reward_features.py
+4a432bb5a088f9e918c1e5d489f847215b4922e1924cf54341771581050f1c52  environments/ShopSimulator/shop_env/web_agent_site/engine/config.py
+a5ad69a75a884900e0fb167705b258d0d37c44babac7850d584fc109275f236a  environments/ShopSimulator/shop_env/configs/environment.json
+c9ea274ec27b9c335e4355b02f892309d8534e315d190ad9344c5a1f90ebe8d4  data/environment.json
+cd48b77a4baf92044cae6c95a02f0e5d4ca1d4541542cf7332334fa1292276ba  data/grpo/metadata.json
+fa29618c858be60e85ab4aa208111fc75157bc94a794122916dfdeeb080b4a84  data/sft_pure_v4/metadata.json
+2e42192522228885cccba7aeff99c20f54097d5adc27f3d3bd76c7f7709e5f1e  src/shopping_grpo/evaluation/rubric.py
+342e6d2c5d85ff4def23fb96e5644dddcbc372416238c1a724b981517ceab318  src/shopping_grpo/evaluation/metrics.py
+dd80886df620173887c70c8799bfcb40cfeaa01a3ff69c983d4c92ca1e8298e9  src/shopping_grpo/evaluation/summary.py
+7532392af4f6dd42bf16d6cfb313bdd087ce6a86f3c7a5c183bfadadb64f3932  src/shopping_grpo/collection/sft.py
+0ac4860fc825e6cd41094d0f61bc99076dd3d6d65d7f5b03792b96332112d0f5  src/shopping_grpo/environment/manifest.py
+c15f7ab2a1aad62004a4fccc6e64f6191a65b3570b4e2011bfdf85db6bb45c80  src/shopping_grpo/training/grpo/adapter/runtime.py
+d35e5ab51e4a64c74bdb5e095c24a0ff8c2a3cb67170c04c110fdb5cf49310c9  src/shopping_grpo/training/grpo/adapter/tools.py

@@ -12,6 +12,7 @@ EMBEDDED_SOURCE_FILE = "EMBEDDED_SOURCE.json"
 SUPPORTED_REWARD_VERSIONS = (
     "shopsimulator-reward-v3",
     "shopsimulator-reward-v4",
+    "shopsimulator-reward-v5",
 )
 REQUIRED_KEYS = {
     "manifest_version",
