@@ -35,19 +35,42 @@ def row(
     nested: bool = False,
     target_asin_match: bool = False,
     budget_status: str = "pass",
+    category_status: str | None = None,
+    selects: int = 0,
+    compact: bool = False,
 ) -> dict:
     steps = [
         {"tool_name": "search_products", "parameters": {"query": "q"}}
         for _ in range(searches)
     ]
     steps += [{"tool_name": "open_product", "parameters": {"asin": asin}} for asin in opened]
+    steps += [
+        {"tool_name": "select_option", "parameters": {"value": f"v{i}"}}
+        for i in range(selects)
+    ]
     if buy:
         steps.append({"tool_name": "buy_now", "parameters": {}})
+    if compact:
+        # 精简形态（process_evidence）：状态是裸字符串，且不带 required/actual。
+        gates: dict = {"budget": budget_status}
+        if category_status is not None:
+            gates["category"] = category_status
+    else:
+        # 完整形态（RewardResult.hard_gates）：每个门是带 status/required/actual 的 dict。
+        gates = {
+            "budget": {
+                "status": budget_status,
+                "required": 30.0,
+                "actual": 40.0 if budget_status == "fail" else 25.0,
+            }
+        }
+        if category_status is not None:
+            gates["category"] = {"status": category_status}
     detail = {
         "reward_type": reward_type,
         "weighted_score": match_score,
         "target_asin_match": target_asin_match,
-        "hard_gates": {"budget": {"status": budget_status}},
+        "hard_gates": gates,
     }
     payload = {"task_id": task_id, "steps": steps}
     if nested:
@@ -70,6 +93,36 @@ class ExtractTest(unittest.TestCase):
     def test_nested_reward_detail_is_read(self) -> None:
         record = module.extract(row(1, "gold_purchase", opened=("A",), nested=True))
         self.assertEqual(record["reward_type"], "gold_purchase")
+
+    def test_full_gate_shape_reads_fail(self) -> None:
+        record = module.extract(row(1, "wrong_purchase", opened=("A",), budget_status="fail"))
+        self.assertEqual(record["budget_status"], "fail")
+        self.assertTrue(record["budget_failed"])
+        self.assertTrue(record["budget_price_known"])
+
+    def test_compact_gate_shape_reads_fail(self) -> None:
+        """精简形态的状态是裸字符串，不能被当成「没有门槛」。"""
+        record = module.extract(
+            row(1, "wrong_purchase", opened=("A",), budget_status="fail", compact=True)
+        )
+        self.assertEqual(record["budget_status"], "fail")
+        self.assertTrue(record["budget_failed"])
+        # 精简形态不带 required/actual，超支幅度不可算，必须显式标记。
+        self.assertFalse(record["budget_price_known"])
+
+    def test_compact_gate_shape_reads_pass(self) -> None:
+        record = module.extract(
+            row(1, "wrong_purchase", opened=("A",), compact=True)
+        )
+        self.assertEqual(record["budget_status"], "pass")
+        self.assertFalse(record["budget_failed"])
+
+    def test_missing_gate_is_not_counted_as_failure(self) -> None:
+        payload = row(1, "max_steps", opened=("A",), buy=False)
+        payload["reward_detail"]["hard_gates"] = {}
+        record = module.extract(payload)
+        self.assertEqual(record["budget_status"], "")
+        self.assertFalse(record["budget_failed"])
 
     def test_valid_alternative_counts_as_success(self) -> None:
         self.assertTrue(module.is_success("valid_alternative_purchase"))
@@ -221,6 +274,77 @@ class VerdictTest(unittest.TestCase):
         )
 
 
+class AggregateGateTest(unittest.TestCase):
+    """门槛口径自检：两种形态都要能被计进「超预算」。"""
+
+    def aggregate(self, *rows) -> dict:
+        group = module.diagnose_group([module.extract(item) for item in rows])
+        return module.aggregate([group])
+
+    def test_compact_shape_counts_toward_budget_failed(self) -> None:
+        summary = self.aggregate(
+            row(1, "gold_purchase", opened=("GOLD",)),
+            row(
+                1, "wrong_purchase", opened=("GOLD",),
+                budget_status="fail", compact=True,
+            ),
+        )
+        self.assertEqual(summary["budget_failed_total"], 1)
+        self.assertEqual(summary["gate_readable"], 1)
+        # 精简形态拿不到 required/actual，必须如实报 0。
+        self.assertEqual(summary["gate_price_known"], 0)
+        self.assertEqual(summary["gate_unexplained"], 0)
+
+    def test_full_shape_reports_price_known(self) -> None:
+        summary = self.aggregate(
+            row(1, "gold_purchase", opened=("GOLD",)),
+            row(1, "wrong_purchase", opened=("GOLD",), budget_status="fail"),
+        )
+        self.assertEqual(summary["budget_failed_total"], 1)
+        self.assertEqual(summary["gate_price_known"], 1)
+
+    def test_wrong_purchase_without_gate_fail_is_flagged(self) -> None:
+        """判定树里 wrong_purchase 必须至少一个硬门 fail；不满足即为解析漏计。"""
+        summary = self.aggregate(
+            row(1, "gold_purchase", opened=("GOLD",)),
+            row(1, "wrong_purchase", opened=("GOLD",), compact=True),
+        )
+        self.assertEqual(summary["budget_failed_total"], 0)
+        self.assertEqual(summary["gate_unexplained"], 1)
+
+    def test_non_purchase_failure_is_not_flagged(self) -> None:
+        summary = self.aggregate(
+            row(1, "gold_purchase", opened=("GOLD",)),
+            row(1, "max_steps", opened=("OTHER",), buy=False, compact=True),
+        )
+        self.assertEqual(summary["gate_unexplained"], 0)
+
+    def test_bought_gold_splits_into_gate_failed_and_short(self) -> None:
+        """买对 gold 却判失败：硬门没过 与 只拿到 partial 必须分开计数。"""
+        summary = self.aggregate(
+            row(1, "gold_purchase", opened=("GOLD",)),
+            row(1, "wrong_purchase", opened=("GOLD",), budget_status="fail"),
+            row(1, "partial_alternative_purchase", opened=("GOLD",), match_score=0.8),
+        )
+        self.assertEqual(summary["gold_bought_total"], 2)
+        self.assertEqual(summary["gold_gate_failed"], 1)
+        self.assertEqual(summary["gold_short_of_gold"], 1)
+        self.assertEqual(
+            summary["gold_short_types"], {"partial_alternative_purchase": 1}
+        )
+
+    def test_bought_gold_with_category_fail_counts_as_gate_failed(self) -> None:
+        summary = self.aggregate(
+            row(1, "gold_purchase", opened=("GOLD",)),
+            row(
+                1, "wrong_purchase", opened=("GOLD",),
+                category_status="fail",
+            ),
+        )
+        self.assertEqual(summary["gold_gate_failed"], 1)
+        self.assertEqual(summary["gold_short_of_gold"], 0)
+
+
 class BuildReportTest(unittest.TestCase):
     def _write(self, rows) -> Path:
         directory = tempfile.mkdtemp()
@@ -280,6 +404,48 @@ class BuildReportTest(unittest.TestCase):
             ambiguous_gold=report["ambiguous_gold"],
         )
         self.assertIn("| `wrong_purchase` | 2 | 1 | 1 | 50.0% |", text)
+
+
+class SelectOptionTest(unittest.TestCase):
+    """「规格没选全 ⇒ 价格还是区间 ⇒ 猜低价 ⇒ 超支」这条假设的直接检验。"""
+
+    def _text(self, rows) -> str:
+        report = module.build_report(self._write(rows))
+        return module.render_report(
+            report["summary"],
+            report["verdict"],
+            report["diagnosed"],
+            source=report["source"],
+            rows=report["rows"],
+            groups=report["groups"],
+            skipped_no_gold=report["skipped_no_gold"],
+            ambiguous_gold=report["ambiguous_gold"],
+        )
+
+    def _write(self, rows) -> Path:
+        directory = tempfile.mkdtemp()
+        path = Path(directory) / "trajectories.jsonl"
+        path.write_text(
+            "\n".join(json.dumps(item, ensure_ascii=False) for item in rows) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_fewer_selects_on_failure_supports_hypothesis(self) -> None:
+        rows = [
+            row(1, "gold_purchase", opened=("G",), selects=2),
+            row(1, "wrong_purchase", opened=("G",), target_asin_match=True,
+                selects=0, budget_status="fail"),
+        ]
+        self.assertIn("支持「规格没选全」", self._text(rows))
+
+    def test_equal_selects_refutes_hypothesis(self) -> None:
+        rows = [
+            row(1, "gold_purchase", opened=("G",), selects=2),
+            row(1, "wrong_purchase", opened=("G",), target_asin_match=True,
+                selects=2, budget_status="fail"),
+        ]
+        self.assertIn("不支持「规格没选全」", self._text(rows))
 
 
 if __name__ == "__main__":

@@ -69,13 +69,21 @@ SAW_GOLD_SHARE_LOW = 0.30
 # 严格成功口径：只有这两类算「做对了」，与 `evaluation/metrics.py` 一致。
 SUCCESS_TYPES = frozenset({"gold_purchase", "valid_alternative_purchase"})
 GOLD_TYPE = "gold_purchase"
+WRONG_TYPE = "wrong_purchase"
 PURCHASE_TOOL = "buy_now"
 OPEN_TOOL = "open_product"
 SEARCH_TOOL = "search_products"
+OPTION_TOOL = "select_option"
 
 # 「买到的替代品有多接近」的分档：ms 高 = 差一点，ms 低 = 没抓住需求。
 CLOSE_MATCH = 0.70
 MID_MATCH = 0.40
+
+# `hard_gates` 在轨迹里有两种序列化形态，解析时必须都认：
+#   1) 完整形态（RewardResult.hard_gates）：{"budget": {"status": "fail", "required": ..}}
+#   2) 精简形态（process_evidence）：      {"budget": "fail"}
+# 只认形态 1 会让形态 2 的门槛状态静默变成「没失败」，把超支失败漏计。
+GATE_FAIL = "fail"
 
 
 # ── 轨迹解析 ────────────────────────────────────────────────────────────
@@ -113,18 +121,35 @@ def _finite(value: object, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _gate_status(gate: object) -> str:
+    """把两种形态的门槛统一成 ``pass`` / ``fail`` / ``unverifiable`` / ``""``。"""
+    if isinstance(gate, Mapping):
+        return str(gate.get("status") or "").strip().lower()
+    if isinstance(gate, str):
+        return gate.strip().lower()
+    return ""
+
+
+def _gate_price_known(gate: object) -> bool:
+    """只有完整形态才带 required/actual；精简形态无法反推超支幅度。"""
+    if not isinstance(gate, Mapping):
+        return False
+    return gate.get("required") is not None and gate.get("actual") is not None
+
+
 def extract(row: Mapping[str, Any]) -> dict[str, Any]:
     """抽出一条轨迹用于本诊断的字段。"""
     detail = _detail(row)
     gates = detail.get("hard_gates")
     gates = gates if isinstance(gates, Mapping) else {}
-    budget = gates.get("budget")
-    budget = budget if isinstance(budget, Mapping) else {}
-    category = gates.get("category")
-    category = category if isinstance(category, Mapping) else {}
+    budget_gate = gates.get("budget")
+    category_gate = gates.get("category")
+    budget_status = _gate_status(budget_gate)
+    category_status = _gate_status(category_gate)
     opened: list[str] = []
     purchased: str | None = None
     searches = 0
+    selects = 0
     for step in _steps(row):
         name = _tool_name(step)
         if name == OPEN_TOOL:
@@ -133,6 +158,8 @@ def extract(row: Mapping[str, Any]) -> dict[str, Any]:
                 opened.append(asin)
         elif name == SEARCH_TOOL:
             searches += 1
+        elif name == OPTION_TOOL:
+            selects += 1
         elif name == PURCHASE_TOOL and purchased is None and opened:
             purchased = opened[-1]
     return {
@@ -140,11 +167,15 @@ def extract(row: Mapping[str, Any]) -> dict[str, Any]:
         "reward_type": str(detail.get("reward_type", "unknown")),
         "match_score": _finite(detail.get("weighted_score")),
         "target_asin_match": bool(detail.get("target_asin_match")),
-        "budget_failed": str(budget.get("status", "")).lower() != "pass" and bool(budget),
-        "category_failed": str(category.get("status", "")).lower() != "pass" and bool(category),
+        "budget_status": budget_status,
+        "category_status": category_status,
+        "budget_failed": budget_status == GATE_FAIL,
+        "category_failed": category_status == GATE_FAIL,
+        "budget_price_known": _gate_price_known(budget_gate),
         "opened": opened,
         "opened_unique": len(set(opened)),
         "searches": searches,
+        "selects": selects,
         "steps": len(_steps(row)),
         "purchased_asin": purchased,
     }
@@ -211,9 +242,18 @@ def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
                 "match_score": record["match_score"],
                 "opened_unique": record["opened_unique"],
                 "searches": record["searches"],
+                "selects": record["selects"],
                 "steps": record["steps"],
+                "budget_status": record["budget_status"],
+                "category_status": record["category_status"],
                 "budget_failed": record["budget_failed"],
                 "category_failed": record["category_failed"],
+                "budget_price_known": record["budget_price_known"],
+                # 「买了 gold 却判失败」有两个完全不同的原因，必须分开看：
+                #   True  —— 硬门真没过（reward.py 判定树里的 wrong_purchase）
+                #   False —— 硬门都过了，只是 match_score / evidence_coverage < 1.0，
+                #            被归成 partial_alternative_purchase（0.25 而非 1.0）
+                "gate_failed": record["budget_failed"] or record["category_failed"],
             }
         )
     saw_gold = sum(1 for item in detail if item["bucket"].startswith(("saw_gold", "bought_gold")))
@@ -222,6 +262,10 @@ def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
         "status": "ok",
         "gold_asin": gold_asin,
         "failures": len(detail),
+        # 同组内成功样本的选规格次数，作为「选全规格」的对照基线。
+        "success_selects": [
+            r["selects"] for r in records if is_success(r["reward_type"])
+        ],
         "saw_gold": saw_gold,
         "never_saw": len(detail) - saw_gold,
         "saw_gold_bought_other": sum(
@@ -299,6 +343,10 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 budget_by_bucket[row["bucket"]]["budget_failed"] += 1
             if row["category_failed"]:
                 budget_by_bucket[row["bucket"]]["category_failed"] += 1
+            if row["gate_failed"]:
+                budget_by_bucket[row["bucket"]]["gate_failed"] += 1
+            else:
+                budget_by_bucket[row["bucket"]]["no_gate_failed"] += 1
 
     # §4 只看「看到过正确商品、但买了别的」——买对了商品却超支的属于另一桶。
     substitute_rows = [
@@ -309,11 +357,28 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         row for item in diagnosed for row in item["detail"]
         if row["bucket"] == "never_saw_gold"
     ]
+    # 「买了 gold 却判失败」拆成两类：硬门真没过 vs 硬门过了但只拿到 partial。
+    gold_bought_rows = [
+        row for item in diagnosed for row in item["detail"]
+        if row["bucket"] == "bought_gold_failed_gate"
+    ]
+    gold_gate_failed = sum(1 for row in gold_bought_rows if row["gate_failed"])
+    gold_short_rows = [row for row in gold_bought_rows if not row["gate_failed"]]
+    gold_short_types = Counter(row["reward_type"] for row in gold_short_rows)
     close = sum(1 for row in substitute_rows if row["match_score"] >= CLOSE_MATCH)
     mid = sum(
         1 for row in substitute_rows if MID_MATCH <= row["match_score"] < CLOSE_MATCH
     )
     far = sum(1 for row in substitute_rows if row["match_score"] < MID_MATCH)
+
+    # 「规格是否选全」的直接检验：同组内成功样本 vs 失败样本的 select_option 次数。
+    success_selects = [
+        value for item in diagnosed for value in item.get("success_selects", [])
+    ]
+    bucket_selects: dict[str, list[int]] = defaultdict(list)
+    for item in diagnosed:
+        for row in item["detail"]:
+            bucket_selects[row["bucket"]].append(row["selects"])
     return {
         "groups": len(diagnosed),
         "failures": failures,
@@ -328,6 +393,29 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "budget_failed_total": sum(
             1 for item in diagnosed for row in item["detail"] if row["budget_failed"]
         ),
+        # 门槛字段的可读性自检：形态 2（精简）读不出 required/actual，超支幅度不可算。
+        # 这两项用来告诉读者「超支占比」这个数是全量还是只覆盖了一部分行。
+        "gate_readable": sum(
+            1 for item in diagnosed for row in item["detail"] if row["budget_status"]
+        ),
+        "gate_price_known": sum(
+            1 for item in diagnosed for row in item["detail"] if row["budget_price_known"]
+        ),
+        # 不变式：`wrong_purchase` 必须至少有一个硬门 fail（reward.py 判定树）。
+        # 若这里 > 0，说明门槛解析仍有漏，超支占比是下限。
+        "gate_unexplained": sum(
+            1
+            for item in diagnosed
+            for row in item["detail"]
+            if row["reward_type"] == WRONG_TYPE
+            and not row["budget_failed"]
+            and not row["category_failed"]
+        ),
+        # 「买对了 gold 却判失败」的原因拆解。
+        "gold_bought_total": len(gold_bought_rows),
+        "gold_gate_failed": gold_gate_failed,
+        "gold_short_of_gold": len(gold_short_rows),
+        "gold_short_types": dict(gold_short_types),
         "saw_close": close,
         "saw_mid": mid,
         "saw_far": far,
@@ -351,6 +439,17 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             sum(1 for row in never_rows if row["opened_unique"] <= 1) / len(never_rows)
             if never_rows else None
         ),
+        "success_select_median": (
+            statistics.median(success_selects) if success_selects else None
+        ),
+        "success_select_count": len(success_selects),
+        "bucket_select_median": {
+            name: statistics.median(values) for name, values in bucket_selects.items()
+            if values
+        },
+        "bucket_select_count": {
+            name: len(values) for name, values in bucket_selects.items()
+        },
     }
 
 
@@ -448,10 +547,10 @@ def render_report(
         lines.append(f"| {label} | {meaning} | {count} | {_share(count, total)} |")
     lines.append("")
 
-    lines.append("### 2.1 硬门交叉（超预算是最容易修的一类）")
+    lines.append("### 2.1 硬门交叉：买了 gold 却判失败，卡在哪一环")
     lines.append("")
-    lines.append("| 桶 | 条数 | 超预算 | 品类错 |")
-    lines.append("|---|---:|---:|---:|")
+    lines.append("| 桶 | 条数 | 硬门真没过 | 其中超预算 | 硬门都过但仍判失败 |")
+    lines.append("|---|---:|---:|---:|---:|")
     for key in (
         "bought_gold_failed_gate",
         "saw_gold_bought_other",
@@ -463,12 +562,42 @@ def render_report(
         if not rows_total:
             continue
         lines.append(
-            f"| `{key}` | {rows_total} | {counter.get('budget_failed', 0)} | "
-            f"{counter.get('category_failed', 0)} |"
+            f"| `{key}` | {rows_total} | {counter.get('gate_failed', 0)} | "
+            f"{counter.get('budget_failed', 0)} | {counter.get('no_gate_failed', 0)} |"
         )
     lines.append("")
     lines.append(
         f"全部失败尝试里 **{_share(summary['budget_failed_total'], total)}** 涉及超预算。"
+    )
+    lines.append("")
+    gold_total = int(summary.get("gold_bought_total", 0))
+    gold_gate = int(summary.get("gold_gate_failed", 0))
+    gold_short = int(summary.get("gold_short_of_gold", 0))
+    if gold_total:
+        short_types = summary.get("gold_short_types", {})
+        type_text = "、".join(
+            f"`{name}` {count}" for name, count in
+            sorted(short_types.items(), key=lambda kv: -kv[1])
+        )
+        lines.append(
+            f"**买对 gold 却判失败的 {gold_total} 条，原因不是同一个：**"
+            f"硬门真没过 {gold_gate} 条（{_share(gold_gate, gold_total)}），"
+            f"硬门都过、却因为 `match_score` / `evidence_coverage` 不到 1.0 "
+            f"被归成 partial 的 {gold_short} 条（{_share(gold_short, gold_total)}）"
+            + (f"，后者类型为 {type_text}。" if type_text else "。")
+        )
+        lines.append("")
+
+    readable = int(summary.get("gate_readable", 0))
+    price_known = int(summary.get("gate_price_known", 0))
+    unexplained = int(summary.get("gate_unexplained", 0))
+    lines.append(
+        f"口径自检：硬门状态可读 **{readable}/{total}** 行"
+        f"（{_share(readable, total)}）；其中能算出超支幅度的 "
+        f"**{price_known}/{total}** 行（{_share(price_known, total)}）。"
+        f"`wrong_purchase` 却两个硬门都没 fail 的异常行 **{unexplained}** 行"
+        + ("——为 0，说明门槛解析与判定树一致。" if unexplained == 0
+           else "——不为 0，超支占比只能当**下限**读。")
     )
     lines.append("")
 
@@ -526,6 +655,46 @@ def render_report(
         f"- 只打开过 ≤1 个商品的比例：**{'—' if single is None else f'{single:.1%}'}**"
         "（高 ⇒ 根本没在比较，只是搜到就买）"
     )
+    lines.append("")
+
+    lines.append("## 5.1 规格选全了吗（超预算的直接检验）")
+    lines.append("")
+    lines.append(
+        "商品价格是**区间**（`price: 14.0 to 37.0`），实际价格取决于选完规格后的 variant。"
+        "所以「选规格次数」少于成功样本 ⇒ 价格还停在区间上，只能猜，容易超支。"
+    )
+    lines.append("")
+    lines.append("| 口径 | 样本数 | `select_option` 次数中位 |")
+    lines.append("|---|---:|---:|")
+    lines.append(
+        f"| **同组成功样本（基线）** | {summary['success_select_count']} | "
+        f"**{_fmt(summary['success_select_median'], 1)}** |"
+    )
+    for key in (
+        "bought_gold_failed_gate",
+        "saw_gold_bought_other",
+        "saw_gold_no_purchase",
+        "never_saw_gold",
+    ):
+        count = summary["bucket_select_count"].get(key, 0)
+        if not count:
+            continue
+        lines.append(
+            f"| `{key}` | {count} | {_fmt(summary['bucket_select_median'].get(key), 1)} |"
+        )
+    lines.append("")
+    base = summary["success_select_median"]
+    bought = summary["bucket_select_median"].get("bought_gold_failed_gate")
+    if base and bought is not None and bought < base:
+        lines.append(
+            f"**支持「规格没选全」**：买对商品却超支的那批，选规格次数 {bought:.1f} "
+            f"< 成功样本 {base:.1f}。"
+        )
+    elif base and bought is not None:
+        lines.append(
+            f"**不支持「规格没选全」**：买对商品却超支的那批，选规格次数 {bought:.1f} "
+            f"≥ 成功样本 {base:.1f} ⇒ 它选全了规格、知道实际价格，仍然买了超预算的东西。"
+        )
     lines.append("")
 
     if diagnosed:

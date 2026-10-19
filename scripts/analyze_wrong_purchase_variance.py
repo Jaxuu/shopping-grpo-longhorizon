@@ -169,6 +169,27 @@ def _finite_float(value: object, default: float = 0.0) -> float:
     return result if math.isfinite(result) else default
 
 
+def _gate_status(gate: object) -> str:
+    """`hard_gates` 有两种序列化形态，都要认。
+
+    完整形态（``RewardResult.hard_gates``）是 ``{"status": .., "required": ..}``；
+    精简形态（``process_evidence``）直接是 ``"pass"`` / ``"fail"`` 字符串。
+    只认前者会把后者读成 ``None``，让「硬门组合」一列凭空多出 ``None/None``。
+    """
+    if isinstance(gate, Mapping):
+        return str(gate.get("status") or "").strip().lower()
+    if isinstance(gate, str):
+        return gate.strip().lower()
+    return ""
+
+
+def _price_known(gate: object) -> bool:
+    """只有完整形态带 required/actual，精简形态算不出超支幅度。"""
+    if not isinstance(gate, Mapping):
+        return False
+    return gate.get("required") is not None and gate.get("actual") is not None
+
+
 def extract_wrong_purchases(
     rows: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -180,20 +201,22 @@ def extract_wrong_purchases(
             continue
         gates = detail.get("hard_gates")
         gates = gates if isinstance(gates, Mapping) else {}
-        budget = gates.get("budget")
-        budget = budget if isinstance(budget, Mapping) else {}
-        category = gates.get("category")
-        category = category if isinstance(category, Mapping) else {}
+        budget_gate = gates.get("budget")
+        category_gate = gates.get("category")
+        budget_known = _price_known(budget_gate)
         match_score = _finite_float(detail.get("weighted_score"))
         records.append(
             {
                 "task_id": _task_id(row, detail),
                 "match_score": match_score,
                 "proximity": budget_proximity(
-                    budget.get("required"), budget.get("actual")
+                    budget_gate.get("required") if budget_known else None,
+                    budget_gate.get("actual") if budget_known else None,
                 ),
-                "category_status": category.get("status"),
-                "budget_status": budget.get("status"),
+                # prox 算不出来时是「未知」，不是「没超预算」，必须能区分。
+                "proximity_known": budget_known,
+                "category_status": _gate_status(category_gate) or None,
+                "budget_status": _gate_status(budget_gate) or None,
                 "target_asin_match": bool(detail.get("target_asin_match")),
                 "reward_v4": _finite_float(
                     detail.get("terminal_utility", detail.get("reward")), WRONG_FLOOR
@@ -336,7 +359,11 @@ def render_report(
 
     if records:
         zero = sum(1 for r in records if r["match_score"] <= 0.0)
-        full = sum(1 for r in records if math.isclose(r["proximity"], 1.0))
+        known = sum(1 for r in records if r.get("proximity_known"))
+        full = sum(
+            1 for r in records
+            if r.get("proximity_known") and math.isclose(r["proximity"], 1.0)
+        )
         lines.append("## 2. 内部解剖")
         lines.append("")
         lines.append("| 观察 | 数值 |")
@@ -348,11 +375,15 @@ def render_report(
         )
         lines.append(f"| `match_score = 0` 的题 | {_share(zero, len(records))} |")
         lines.append(
-            f"| 预算未超（`proximity = 1.0`）的题 | {_share(full, len(records))} "
-            "（即失败原因不是超预算） |"
+            f"| 能算出超支幅度（`proximity` 可算）的题 | {_share(known, len(records))} |"
+        )
+        lines.append(
+            f"| 其中预算未超（`proximity = 1.0`）的题 | {_share(full, len(records))} "
+            "（失败原因不是超预算） |"
         )
         gate_pairs = Counter(
-            (str(r["category_status"]), str(r["budget_status"])) for r in records
+            (str(r["category_status"] or "—"), str(r["budget_status"] or "—"))
+            for r in records
         )
         lines.append(
             "| hard gate 组合 | "
