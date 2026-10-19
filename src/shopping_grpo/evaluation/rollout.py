@@ -15,7 +15,12 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from shopping_grpo.environment.actions import action_guard_tool_message, action_reject_reason
+from shopping_grpo.environment.actions import (
+    action_guard_tool_message,
+    action_reject_reason,
+    product_ids,
+    required_candidate_opens,
+)
 from shopping_grpo.environment.context import (
     ContextBudgetError,
     VllmChatTokenCounter,
@@ -279,8 +284,14 @@ def collect_for_task(
     max_steps=30,
     tools=None,
     attempt_index=0,
+    min_opened_before_buy=0,
 ):
-    """执行一个任务并返回完整轨迹；所有异常都会被写入轨迹后再释放环境。"""
+    """执行一个任务并返回完整轨迹；所有异常都会被写入轨迹后再释放环境。
+
+    ``min_opened_before_buy`` 是诊断开关（默认 0 = 关闭）：大于 0 时，``buy_now``
+    在打开过的不同候选数不足之前会被动作守卫拒绝。它只影响"允不允许下单"，
+    不改奖励、不改题目、不泄露答案，用于测量「多看几个候选」的收益上界。
+    """
     trajectory = {
         "trajectory_id": str(uuid4()),
         "task_id": int(task["task_id"]),
@@ -299,6 +310,8 @@ def collect_for_task(
         "done": False,
         "error": None,
         "release_error": None,
+        "min_opened_before_buy": int(min_opened_before_buy),
+        "opened_candidates": [],
     }
     env = env_factory(base_url=base_url)
     try:
@@ -318,6 +331,8 @@ def collect_for_task(
         tool_schemas = tools or SHOP_TOOL_SCHEMAS
         consecutive_blocked_calls = 0
         latest_observation_truncated = False
+        opened_candidates = set()
+        max_candidates_seen = 0
 
         while len(trajectory["steps"]) < int(max_steps):
             # 先请求模型，再校验动作；工具结果会追加到 messages，成为下一轮上下文。
@@ -359,6 +374,9 @@ def collect_for_task(
                     name,
                     arguments,
                     latest_observation,
+                    opened_candidates=len(opened_candidates),
+                    available_candidates=max_candidates_seen,
+                    min_opened_before_buy=min_opened_before_buy,
                 )
             except Exception as exc:
                 reason = f"invalid_tool_call:{exc.__class__.__name__}"
@@ -374,7 +392,19 @@ def collect_for_task(
                     }
                 )
                 messages.append(assistant)
-                messages.append(action_guard_tool_message(tool_call, reason, latest_observation))
+                messages.append(
+                    action_guard_tool_message(
+                        tool_call,
+                        reason,
+                        latest_observation,
+                        hint=_candidate_hint(
+                            reason,
+                            min_opened_before_buy,
+                            max_candidates_seen,
+                            len(opened_candidates),
+                        ),
+                    )
+                )
                 if consecutive_blocked_calls >= MAX_BLOCKED_TOOL_CALLS:
                     trajectory["status"] = "invalid_action_limit"
                     break
@@ -385,6 +415,11 @@ def collect_for_task(
             messages.append(assistant)
             # 只有通过当前 observation 守卫的调用才会触碰环境并消耗一个执行步骤。
             step = _execute_tool_call(env, tool_call, len(trajectory["steps"]))
+            if step["tool_name"] == "open_product":
+                opened_asin = str((step.get("parameters") or {}).get("asin") or "")
+                if opened_asin:
+                    opened_candidates.add(opened_asin)
+                    trajectory["opened_candidates"] = sorted(opened_candidates)
             raw_observation = step["observation"]
             projector = getattr(client, "project_observation", None)
             if projector is not None:
@@ -400,6 +435,9 @@ def collect_for_task(
             trajectory["steps"].append(step)
             consecutive_blocked_calls = 0
             latest_observation = step["observation"]
+            max_candidates_seen = max(
+                max_candidates_seen, len(product_ids(latest_observation))
+            )
             latest_observation_truncated = bool(
                 (step.get("projection") or {}).get("truncated")
             )
@@ -458,6 +496,7 @@ def collect_tasks(
     max_steps=30,
     env_factory=ShopAgentEnv,
     attempts_per_task=1,
+    min_opened_before_buy=0,
 ):
     attempts_per_task = int(attempts_per_task)
     if attempts_per_task < 1:
@@ -476,6 +515,7 @@ def collect_tasks(
                 base_url=base_url,
                 max_steps=max_steps,
                 attempt_index=attempt_index,
+                min_opened_before_buy=min_opened_before_buy,
             )
             append_jsonl(output_path, [trajectory])
             written.append(trajectory)
@@ -499,6 +539,17 @@ def _is_infrastructure_failure(trajectory):
     return (
         error_type == ShopEnvironmentError.__name__
         and "Unable to get available environment resource" in error.get("message", "")
+    )
+
+
+def _candidate_hint(reason, min_opened_before_buy, available_candidates, opened_count):
+    """当 ``buy_now`` 因候选数不足被拒时，告诉模型怎么满足要求（不给答案）。"""
+    if not str(reason).startswith("insufficient_candidates_compared:"):
+        return None
+    required = required_candidate_opens(min_opened_before_buy, available_candidates)
+    return (
+        f"购买前必须先比较至少 {required} 个不同候选，当前只打开过 {opened_count} 个。"
+        "请调用 back_to_search 回到搜索结果页，再 open_product 另一个候选的 ASIN。"
     )
 
 

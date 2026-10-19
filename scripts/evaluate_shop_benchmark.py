@@ -49,6 +49,15 @@ def parse_args():
     parser.add_argument("--observation-detail-token-budget", type=int, default=4096)
     parser.add_argument("--observation-generic-token-budget", type=int, default=768)
     parser.add_argument("--observation-search-top-k", type=int, default=20)
+    parser.add_argument(
+        "--min-opened-before-buy",
+        type=int,
+        default=0,
+        help=(
+            "诊断开关：买之前必须打开过多少个不同候选，默认 0=关闭。"
+            "开启后评测分数不可与历史 62.0% 直接比较，它只用于测量探索收益上界。"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -95,6 +104,7 @@ def main():
         output_path=args.output,
         base_url=args.base_url,
         max_steps=args.max_steps,
+        min_opened_before_buy=args.min_opened_before_buy,
     )
     summary = summarize_trajectories(
         [task["task_id"] for task in tasks], _read_jsonl(args.output)
@@ -114,6 +124,7 @@ def main():
         "observation_detail_token_budget": args.observation_detail_token_budget,
         "observation_generic_token_budget": args.observation_generic_token_budget,
         "observation_search_top_k": args.observation_search_top_k,
+        "min_opened_before_buy": args.min_opened_before_buy,
     }
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

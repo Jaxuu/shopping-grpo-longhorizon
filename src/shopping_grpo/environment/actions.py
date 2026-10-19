@@ -28,11 +28,23 @@ TOOL_ARGUMENT_NAMES = {
 }
 
 
-def action_reject_reason(name, arguments, observation):
+def action_reject_reason(
+    name,
+    arguments,
+    observation,
+    opened_candidates=0,
+    available_candidates=None,
+    min_opened_before_buy=0,
+):
     """返回动作拒绝原因；``None`` 表示允许执行。
 
 检查顺序很重要：先拦截 schema 外字段，再处理无需页面状态的动作，最后只允许
 点击最新 observation 中仍然存在的目标。
+
+``min_opened_before_buy`` 是**诊断开关**（默认 0 = 关闭）：大于 0 时，``buy_now``
+在打开过的不同候选数不足之前会被拒绝。它只改"允不允许下单"，不改奖励、不改题目、
+不泄露正确答案；用途是量出「多看几个候选」这条路的收益上界，见
+``scripts/analyze_candidate_exploration.py``。
 """
     extra_argument_names = _schema_extra_argument_names(name, arguments)
     if extra_argument_names:
@@ -66,7 +78,21 @@ def action_reject_reason(name, arguments, observation):
         return "select_option_is_navigation_button"
     if target not in {button.casefold() for button in clickable_buttons(observation)}:
         return "click_not_in_previous_observation"
+    if name == "buy_now":
+        required = required_candidate_opens(min_opened_before_buy, available_candidates)
+        if required and int(opened_candidates) < required:
+            return f"insufficient_candidates_compared:{int(opened_candidates)}/{required}"
     return None
+
+
+def required_candidate_opens(min_opened_before_buy, available_candidates=None):
+    """把「至少要打开几个候选」夹到实际可选范围内，避免题目本身无解。"""
+    minimum = int(min_opened_before_buy or 0)
+    if minimum <= 0:
+        return 0
+    if available_candidates is None:
+        return minimum
+    return max(0, min(minimum, int(available_candidates)))
 
 
 def _schema_extra_argument_names(name, arguments):
@@ -77,7 +103,7 @@ def _schema_extra_argument_names(name, arguments):
     return sorted(set(arguments) - allowed_names)
 
 
-def action_guard_tool_message(tool_call, reason, observation):
+def action_guard_tool_message(tool_call, reason, observation, hint=None):
     """构造标准 tool error observation，让 Agent 感知调用未被执行。"""
     targets = clickable_buttons(observation)
     asins = product_ids(observation)
@@ -98,6 +124,8 @@ def action_guard_tool_message(tool_call, reason, observation):
         correction = f"你处于信息子页，下一步只能调用 {' 或 '.join(return_tools)}。"
     else:
         correction = "下一步只能从当前页面列出的目标中选择。"
+    if hint:
+        correction = f"{hint}{correction}"
     return {
         "role": "tool",
         "tool_call_id": tool_call.get("id"),
