@@ -530,7 +530,7 @@ def render_report(
     bucket_text = {
         "bought_gold_failed_gate": (
             "`bought_gold_failed_gate`",
-            "**买的就是正确商品**，只是没过硬门（多为超预算）",
+            "**买的就是正确商品**，但仍被判失败（硬门没过，或没达到满分）",
         ),
         "saw_gold_bought_other": ("`saw_gold_bought_other`", "打开过正确商品，最后买了别的"),
         "saw_gold_no_purchase": ("`saw_gold_no_purchase`", "打开过正确商品，但没下单"),
@@ -549,7 +549,7 @@ def render_report(
 
     lines.append("### 2.1 硬门交叉：买了 gold 却判失败，卡在哪一环")
     lines.append("")
-    lines.append("| 桶 | 条数 | 硬门真没过 | 其中超预算 | 硬门都过但仍判失败 |")
+    lines.append("| 桶 | 条数 | 硬门真没过 | 其中超预算 | 无硬门失败 |")
     lines.append("|---|---:|---:|---:|---:|")
     for key in (
         "bought_gold_failed_gate",
@@ -581,9 +581,9 @@ def render_report(
         )
         lines.append(
             f"**买对 gold 却判失败的 {gold_total} 条，原因不是同一个：**"
-            f"硬门真没过 {gold_gate} 条（{_share(gold_gate, gold_total)}），"
+            f"硬门真没过 {gold_gate} 条（{gold_gate / gold_total:.1%}），"
             f"硬门都过、却因为 `match_score` / `evidence_coverage` 不到 1.0 "
-            f"被归成 partial 的 {gold_short} 条（{_share(gold_short, gold_total)}）"
+            f"被归成 partial 的 {gold_short} 条（{gold_short / gold_total:.1%}）"
             + (f"，后者类型为 {type_text}。" if type_text else "。")
         )
         lines.append("")
