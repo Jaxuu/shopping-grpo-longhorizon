@@ -19,11 +19,21 @@ M8-0 证明了两件事：全错组不是复制品（模型确实在换路试）
 
 关键设计：正确商品从轨迹里自己推出来
 ------------------------------------
-`reward_detail` 只落 `target_asin_match`（布尔），**不落正确 ASIN**。但同一道题里
-只要有 `gold_purchase` 的那一次，它买到的 ASIN 就是正确 ASIN（gold 的定义就是
-`product.asin == goal.asin`）。所以：
+`reward_detail` 只落 `target_asin_match`（布尔），**不落正确 ASIN**。有两个来源可以反推：
 
-    gold_asin := 该组内任一 gold_purchase 轨迹最后买到的 ASIN
+1. `gold_purchase` 行买到的 ASIN（gold 的定义就是 `product.asin == goal.asin`）；
+2. **任何 `target_asin_match == True` 的行**买到的 ASIN——即使它因为超预算被判成
+   `wrong_purchase`。
+
+第 2 条不能漏：漏了会把「买对了商品但超支」的整批组跳过，而那恰好是最容易修的一类
+（只需教「下单前核对选完规格后的实际价格」）。实测里这类占买错的 26.4%。
+
+四个桶（互斥）：
+
+* `bought_gold_failed_gate` —— 买的就是正确商品，只是没过硬门（多为超预算）
+* `saw_gold_bought_other`   —— 打开过正确商品，最后买了别的
+* `saw_gold_no_purchase`    —— 打开过正确商品，但没下单
+* `never_saw_gold`          —— 从没打开过正确商品
 
 不需要外部数据、不需要起环境服务、不需要显卡。
 
@@ -106,6 +116,12 @@ def _finite(value: object, default: float = 0.0) -> float:
 def extract(row: Mapping[str, Any]) -> dict[str, Any]:
     """抽出一条轨迹用于本诊断的字段。"""
     detail = _detail(row)
+    gates = detail.get("hard_gates")
+    gates = gates if isinstance(gates, Mapping) else {}
+    budget = gates.get("budget")
+    budget = budget if isinstance(budget, Mapping) else {}
+    category = gates.get("category")
+    category = category if isinstance(category, Mapping) else {}
     opened: list[str] = []
     purchased: str | None = None
     searches = 0
@@ -123,6 +139,9 @@ def extract(row: Mapping[str, Any]) -> dict[str, Any]:
         "task_id": str(row.get("task_id")),
         "reward_type": str(detail.get("reward_type", "unknown")),
         "match_score": _finite(detail.get("weighted_score")),
+        "target_asin_match": bool(detail.get("target_asin_match")),
+        "budget_failed": str(budget.get("status", "")).lower() != "pass" and bool(budget),
+        "category_failed": str(category.get("status", "")).lower() != "pass" and bool(category),
         "opened": opened,
         "opened_unique": len(set(opened)),
         "searches": searches,
@@ -139,12 +158,23 @@ def is_success(reward_type: str) -> bool:
 def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """对一个同题组做「看到没买 / 根本没看到」的判定。
 
-    返回 ``None`` 表示该组无法诊断（没有 gold 行 ⇒ 推不出正确 ASIN）。
+    正确 ASIN 有两个来源，缺一不可：
+
+    * `gold_purchase` 行买到的 ASIN；
+    * 任何 `target_asin_match == True` 的行买到的 ASIN——**即使它因为超预算被判
+      `wrong_purchase`**。漏掉这个来源会把「买对了商品但超支」的组整批跳过，
+      而那恰好是最容易修的一类（只需教「下单前核对实际价格」）。
+
+    返回 ``None`` 表示该组无法诊断（没有任何一条买到过正确商品）。
     """
-    golds = [r for r in records if r["reward_type"] == GOLD_TYPE and r["purchased_asin"]]
-    if not golds:
+    evidence = [
+        r for r in records
+        if r["purchased_asin"]
+        and (r["reward_type"] == GOLD_TYPE or r["target_asin_match"])
+    ]
+    if not evidence:
         return None
-    gold_asins = {r["purchased_asin"] for r in golds}
+    gold_asins = {r["purchased_asin"] for r in evidence}
     if len(gold_asins) > 1:
         # 同一题出现两个不同 gold ASIN ⇒ 数据或口径有问题，不猜，直接标记。
         return {
@@ -156,6 +186,7 @@ def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
             "never_saw": 0,
             "saw_gold_bought_other": 0,
             "saw_gold_no_purchase": 0,
+            "bought_gold_failed_gate": 0,
             "detail": [],
         }
     gold_asin = next(iter(gold_asins))
@@ -164,7 +195,10 @@ def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
         if is_success(record["reward_type"]):
             continue
         saw = gold_asin in record["opened"]
-        if saw and record["purchased_asin"]:
+        bought_gold = record["purchased_asin"] == gold_asin
+        if bought_gold:
+            bucket = "bought_gold_failed_gate"
+        elif saw and record["purchased_asin"]:
             bucket = "saw_gold_bought_other"
         elif saw:
             bucket = "saw_gold_no_purchase"
@@ -178,9 +212,11 @@ def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
                 "opened_unique": record["opened_unique"],
                 "searches": record["searches"],
                 "steps": record["steps"],
+                "budget_failed": record["budget_failed"],
+                "category_failed": record["category_failed"],
             }
         )
-    saw_gold = sum(1 for item in detail if item["bucket"].startswith("saw_gold"))
+    saw_gold = sum(1 for item in detail if item["bucket"].startswith(("saw_gold", "bought_gold")))
     return {
         "task_id": records[0]["task_id"],
         "status": "ok",
@@ -193,6 +229,9 @@ def diagnose_group(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
         ),
         "saw_gold_no_purchase": sum(
             1 for item in detail if item["bucket"] == "saw_gold_no_purchase"
+        ),
+        "bought_gold_failed_gate": sum(
+            1 for item in detail if item["bucket"] == "bought_gold_failed_gate"
         ),
         "detail": detail,
     }
@@ -251,25 +290,30 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         row["bucket"] for item in diagnosed for row in item["detail"]
     )
     by_type: dict[str, Counter] = defaultdict(Counter)
+    budget_by_bucket: dict[str, Counter] = defaultdict(Counter)
     for item in diagnosed:
         for row in item["detail"]:
             by_type[row["reward_type"]][row["bucket"]] += 1
+            budget_by_bucket[row["bucket"]]["total"] += 1
+            if row["budget_failed"]:
+                budget_by_bucket[row["bucket"]]["budget_failed"] += 1
+            if row["category_failed"]:
+                budget_by_bucket[row["bucket"]]["category_failed"] += 1
 
-    saw_rows = [
+    # §4 只看「看到过正确商品、但买了别的」——买对了商品却超支的属于另一桶。
+    substitute_rows = [
         row for item in diagnosed for row in item["detail"]
-        if row["bucket"].startswith("saw_gold")
+        if row["bucket"] == "saw_gold_bought_other"
     ]
     never_rows = [
         row for item in diagnosed for row in item["detail"]
         if row["bucket"] == "never_saw_gold"
     ]
-    close = sum(
-        1 for row in saw_rows if row["match_score"] >= CLOSE_MATCH
-    )
+    close = sum(1 for row in substitute_rows if row["match_score"] >= CLOSE_MATCH)
     mid = sum(
-        1 for row in saw_rows if MID_MATCH <= row["match_score"] < CLOSE_MATCH
+        1 for row in substitute_rows if MID_MATCH <= row["match_score"] < CLOSE_MATCH
     )
-    far = sum(1 for row in saw_rows if row["match_score"] < MID_MATCH)
+    far = sum(1 for row in substitute_rows if row["match_score"] < MID_MATCH)
     return {
         "groups": len(diagnosed),
         "failures": failures,
@@ -278,12 +322,18 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "saw_share": saw / failures if failures else None,
         "buckets": dict(buckets),
         "by_type": {name: dict(counter) for name, counter in by_type.items()},
+        "budget_by_bucket": {
+            name: dict(counter) for name, counter in budget_by_bucket.items()
+        },
+        "budget_failed_total": sum(
+            1 for item in diagnosed for row in item["detail"] if row["budget_failed"]
+        ),
         "saw_close": close,
         "saw_mid": mid,
         "saw_far": far,
         "saw_match_median": (
-            statistics.median([row["match_score"] for row in saw_rows])
-            if saw_rows else None
+            statistics.median([row["match_score"] for row in substitute_rows])
+            if substitute_rows else None
         ),
         "never_opened_median": (
             statistics.median([row["opened_unique"] for row in never_rows])
@@ -294,8 +344,8 @@ def aggregate(diagnosed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             if never_rows else None
         ),
         "saw_opened_median": (
-            statistics.median([row["opened_unique"] for row in saw_rows])
-            if saw_rows else None
+            statistics.median([row["opened_unique"] for row in substitute_rows])
+            if substitute_rows else None
         ),
         "single_open_share_never": (
             sum(1 for row in never_rows if row["opened_unique"] <= 1) / len(never_rows)
@@ -308,7 +358,7 @@ def verdict(summary: Mapping[str, Any], *, high: float, low: float) -> dict[str,
     if not summary["failures"]:
         return {
             "status": "not_measured",
-            "reason": "没有可诊断的失败尝试（需要同题组里至少有一次 gold_purchase）",
+            "reason": "没有可诊断的失败尝试（需要同题组里有轨迹买到过正确商品）",
             "next": "换用含成功样本的探针产物；全错的题推不出正确商品",
         }
     share = float(summary["saw_share"])
@@ -353,11 +403,11 @@ def render_report(
     lines.append("")
     lines.append(f"> 输入：`{source}`，{rows} 条轨迹 / {groups} 个同题组。")
     lines.append(
-        "> 口径：正确商品从组内的 `gold_purchase` 轨迹反推（`gold` 的定义就是"
-        "「买到的 ASIN == 目标 ASIN」）；只诊断**含至少一次成功**的组。"
+        "> 口径：正确商品从组内 `gold_purchase` **或 `target_asin_match=True`** 的轨迹反推"
+        "（后者覆盖「买对了商品但超支」）；只诊断能反推出正确商品的组。"
     )
     lines.append(
-        f"> 跳过：无 gold 行无法反推的组 {skipped_no_gold} 个"
+        f"> 跳过：无法反推正确商品的组 {skipped_no_gold} 个"
         + (f"；gold ASIN 不一致的组 {ambiguous_gold} 个" if ambiguous_gold else "")
         + "。"
     )
@@ -379,14 +429,47 @@ def render_report(
     lines.append("|---|---|---:|---:|")
     total = summary["failures"]
     bucket_text = {
+        "bought_gold_failed_gate": (
+            "`bought_gold_failed_gate`",
+            "**买的就是正确商品**，只是没过硬门（多为超预算）",
+        ),
         "saw_gold_bought_other": ("`saw_gold_bought_other`", "打开过正确商品，最后买了别的"),
         "saw_gold_no_purchase": ("`saw_gold_no_purchase`", "打开过正确商品，但没下单"),
         "never_saw_gold": ("`never_saw_gold`", "从没打开过正确商品"),
     }
-    for key in ("saw_gold_bought_other", "saw_gold_no_purchase", "never_saw_gold"):
+    for key in (
+        "bought_gold_failed_gate",
+        "saw_gold_bought_other",
+        "saw_gold_no_purchase",
+        "never_saw_gold",
+    ):
         count = int(summary["buckets"].get(key, 0))
         label, meaning = bucket_text[key]
         lines.append(f"| {label} | {meaning} | {count} | {_share(count, total)} |")
+    lines.append("")
+
+    lines.append("### 2.1 硬门交叉（超预算是最容易修的一类）")
+    lines.append("")
+    lines.append("| 桶 | 条数 | 超预算 | 品类错 |")
+    lines.append("|---|---:|---:|---:|")
+    for key in (
+        "bought_gold_failed_gate",
+        "saw_gold_bought_other",
+        "saw_gold_no_purchase",
+        "never_saw_gold",
+    ):
+        counter = summary["budget_by_bucket"].get(key, {})
+        rows_total = counter.get("total", 0)
+        if not rows_total:
+            continue
+        lines.append(
+            f"| `{key}` | {rows_total} | {counter.get('budget_failed', 0)} | "
+            f"{counter.get('category_failed', 0)} |"
+        )
+    lines.append("")
+    lines.append(
+        f"全部失败尝试里 **{_share(summary['budget_failed_total'], total)}** 涉及超预算。"
+    )
     lines.append("")
 
     lines.append("## 3. 按失败类型分层")
@@ -396,8 +479,10 @@ def render_report(
     for name, counter in sorted(
         summary["by_type"].items(), key=lambda kv: -sum(kv[1].values())
     ):
-        seen = counter.get("saw_gold_bought_other", 0) + counter.get(
-            "saw_gold_no_purchase", 0
+        seen = (
+            counter.get("bought_gold_failed_gate", 0)
+            + counter.get("saw_gold_bought_other", 0)
+            + counter.get("saw_gold_no_purchase", 0)
         )
         missed = counter.get("never_saw_gold", 0)
         total_type = seen + missed

@@ -33,6 +33,8 @@ def row(
     match_score: float = 0.4,
     searches: int = 1,
     nested: bool = False,
+    target_asin_match: bool = False,
+    budget_status: str = "pass",
 ) -> dict:
     steps = [
         {"tool_name": "search_products", "parameters": {"query": "q"}}
@@ -41,7 +43,12 @@ def row(
     steps += [{"tool_name": "open_product", "parameters": {"asin": asin}} for asin in opened]
     if buy:
         steps.append({"tool_name": "buy_now", "parameters": {}})
-    detail = {"reward_type": reward_type, "weighted_score": match_score}
+    detail = {
+        "reward_type": reward_type,
+        "weighted_score": match_score,
+        "target_asin_match": target_asin_match,
+        "hard_gates": {"budget": {"status": budget_status}},
+    }
     payload = {"task_id": task_id, "steps": steps}
     if nested:
         payload["terminal_result"] = {"reward_detail": detail}
@@ -133,6 +140,35 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(result["status"], "ambiguous_gold")
         self.assertEqual(result["gold_asins"], ["G1", "G2"])
 
+    def test_target_asin_match_supplies_gold_without_gold_row(self) -> None:
+        """整组都因超预算被判 wrong_purchase，但仍能从 target_asin_match 反推 gold。
+
+        漏掉这个来源会把「买对了商品却超支」的整批组跳过，而那是最容易修的一类。
+        """
+        result = module.diagnose_group(
+            self.group(
+                row(1, "wrong_purchase", opened=("G",), target_asin_match=True,
+                    match_score=1.0, budget_status="fail"),
+                row(1, "wrong_purchase", opened=("X",), match_score=0.3,
+                    budget_status="fail"),
+            )
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["gold_asin"], "G")
+        self.assertEqual(result["bought_gold_failed_gate"], 1)
+        self.assertEqual(result["never_saw"], 1)
+
+    def test_bought_gold_counts_as_saw(self) -> None:
+        result = module.diagnose_group(
+            self.group(
+                row(1, "gold_purchase", opened=("G",)),
+                row(1, "wrong_purchase", opened=("G",), target_asin_match=True,
+                    budget_status="fail"),
+            )
+        )
+        self.assertEqual(result["saw_gold"], 1)
+        self.assertEqual(result["never_saw"], 0)
+
 
 class CollectTest(unittest.TestCase):
     def test_counts_skipped_and_ambiguous(self) -> None:
@@ -221,6 +257,29 @@ class BuildReportTest(unittest.TestCase):
     def test_empty_input_is_not_measured(self) -> None:
         report = module.build_report(self._write([row(1, "wrong_purchase", opened=("A",))]))
         self.assertEqual(report["verdict"]["status"], "not_measured")
+
+    def test_by_type_seen_includes_bought_gold(self) -> None:
+        """§3 的「看到过」必须含 `bought_gold_failed_gate`，否则会漏掉最易修的一类。"""
+        rows = [
+            row(1, "gold_purchase", opened=("G",)),
+            row(1, "wrong_purchase", opened=("G",), target_asin_match=True,
+                budget_status="fail"),
+            row(1, "wrong_purchase", opened=("X",), budget_status="fail"),
+        ]
+        report = module.build_report(self._write(rows))
+        counter = report["summary"]["by_type"]["wrong_purchase"]
+        self.assertEqual(counter["bought_gold_failed_gate"], 1)
+        text = module.render_report(
+            report["summary"],
+            report["verdict"],
+            report["diagnosed"],
+            source=report["source"],
+            rows=report["rows"],
+            groups=report["groups"],
+            skipped_no_gold=report["skipped_no_gold"],
+            ambiguous_gold=report["ambiguous_gold"],
+        )
+        self.assertIn("| `wrong_purchase` | 2 | 1 | 1 | 50.0% |", text)
 
 
 if __name__ == "__main__":
