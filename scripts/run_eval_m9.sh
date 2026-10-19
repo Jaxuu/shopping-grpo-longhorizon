@@ -48,7 +48,22 @@ echo " 权重：$MODEL"
 echo " 输出：$OUT_DIR"
 echo "=================================================="
 
-[[ -f "$MODEL/config.json" ]] || die "找不到权重 $MODEL/config.json，先 ls outputs/models/ 确认真实路径"
+# 克隆机/重启后权重路径可能不同：默认路径不在就自己找，别让人猜。
+if [[ ! -f "$MODEL/config.json" ]]; then
+  log "默认权重路径不存在，正在 outputs/models 下查找 config.json…"
+  found=$(find "$ROOT/outputs/models" -maxdepth 4 -name config.json -printf '%h\n' 2>/dev/null | sort -u | head -20)
+  if [[ -n "$found" ]]; then
+    echo "找到这些权重目录："
+    printf '  %s\n' $found
+    pick=$(printf '%s\n' "$found" | grep -i 'sft-b' | head -1)
+    if [[ -n "$pick" ]]; then
+      MODEL="$pick"
+      log "自动选用：$MODEL"
+    fi
+  fi
+fi
+[[ -f "$MODEL/config.json" ]] || die "找不到权重：$MODEL/config.json。用 MODEL=<路径> bash scripts/run_eval_m9.sh 指定"
+
 command -v tmux >/dev/null 2>&1 || die "找不到 tmux，先 apt install tmux"
 
 if [[ "${SKIP_PREFLIGHT:-0}" != "1" ]]; then
@@ -58,12 +73,28 @@ fi
 
 # ---------- 1. 商店环境（纯 CPU） ----------
 echo
+# 32 个环境实例每个都加载 23,421 条商品；内存小的机器会被 OOM killer 杀进程，
+# 表现就是端口 000 + 显存 1 MiB。按可用内存自动降档，不让人去猜。
+SLOTS="${SHOPSIM_ENV_SLOTS:-32}"
+mem_avail_gb=$(free -g 2>/dev/null | awk '/^Mem:/{print $7}')
+if [[ -n "${mem_avail_gb:-}" ]] && (( mem_avail_gb > 0 )); then
+  if (( mem_avail_gb < 24 )) && (( SLOTS > 8 )); then
+    SLOTS=8
+    log "可用内存仅 ${mem_avail_gb} GB，环境实例数自动降到 8"
+  elif (( mem_avail_gb < 48 )) && (( SLOTS > 16 )); then
+    SLOTS=16
+    log "可用内存 ${mem_avail_gb} GB，环境实例数自动降到 16"
+  else
+    log "可用内存 ${mem_avail_gb} GB，环境实例数 ${SLOTS}"
+  fi
+fi
+
 if tmux has-session -t "$ENV_SESSION" 2>/dev/null; then
   log "tmux 会话 [$ENV_SESSION] 已存在，跳过启动"
 else
   tmux new-session -d -s "$ENV_SESSION" \
-    "cd '$ROOT' && SHOPSIM_ENV_SLOTS='${SHOPSIM_ENV_SLOTS:-32}' bash scripts/start_environment.sh 2>&1 | tee '$LOG_DIR/env.log'"
-  log "已在 tmux 会话 [$ENV_SESSION] 启动商店环境（日志 $LOG_DIR/env.log）"
+    "cd '$ROOT' && SHOPSIM_ENV_SLOTS='$SLOTS' bash scripts/start_environment.sh 2>&1 | tee '$LOG_DIR/env.log'"
+  log "已在 tmux 会话 [$ENV_SESSION] 启动商店环境（实例数 $SLOTS，日志 $LOG_DIR/env.log）"
 fi
 
 log "等待商店环境就绪（最多 ${WAIT_ENV_SECONDS}s）…"
@@ -105,6 +136,12 @@ for ((i = 1; i <= WAIT_MODEL_SECONDS; i += 10)); do
   fi
   if (( i % 60 == 0 )); then
     log "  …已等 $((i / 60)) 分钟，vLLM 最后一行日志：$(tail -1 "$LOG_DIR/vllm.log" 2>/dev/null | cut -c1-100)"
+  fi
+  # vLLM 自己退了就别等满 40 分钟
+  if ! tmux has-session -t "$VLLM_SESSION" 2>/dev/null; then
+    echo "--- vllm.log 末尾 ---"
+    tail -30 "$LOG_DIR/vllm.log" 2>/dev/null
+    die "vLLM 进程退出。常见原因：显存不足（试 GPU_MEM_UTIL=0.85）、端口 8000 被占用、权重文件不完整"
   fi
   sleep 10
 done
