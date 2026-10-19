@@ -90,13 +90,18 @@ def diagnose(trajectories):
                 if item.get("passed"):
                     continue
                 required = item.get("required") or {}
+                wrong = (item.get("evidence") or {}).get("wrong_values") or []
                 for axis, meta in required.items():
                     value = str(meta.get("value") or "")
                     option_checks.append(
                         {
                             "axis": axis,
                             "required": value,
-                            "selected": (item.get("evidence") or {}).get("wrong_values"),
+                            "selected": "、".join(
+                                str(w.get("selected") or "")
+                                for w in wrong
+                                if str(w.get("axis") or "") == str(axis)
+                            ),
                             "visibility": _visibility(value, observation),
                         }
                     )
