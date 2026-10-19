@@ -3,7 +3,7 @@
 钉死四件事（改动前先看这里）：
 
 1. **分档只看「成功+失败」混合的题**——全对或全错的题不是「边缘」，不入池。
-2. **A 档优先级最高**：出现 `bought_gold_failed_gate`（买对商品却超支）即 A，
+2. **A 档优先级最高**：出现 `bought_gold_failed_gate`（买对商品但规格错/超支）即 A，
    不管组里是否还有别的桶。
 3. **held-out 必须剔除**，且 `--limit` 在排序之后生效（否则会先截断再排序）。
 4. **输出格式必须是 `{"task_id": N}`**，可直接传给 `collect_sft_data.py --tasks`。
@@ -145,6 +145,41 @@ class SelectTest(unittest.TestCase):
         self.assertEqual([item["task_id"] for item in result["selected"]], [101, 102])
         self.assertEqual(result["tiers"], {"A": 1, "C": 1})
         self.assertEqual(result["skipped_no_mix"], 1)
+
+    def test_winnable_and_spec_failed_are_reported(self) -> None:
+        """A 档的靶点是「规格选错」，且要标出这题是否赢过（决定重采命中率）。"""
+        result = module.select(self.rows(), held_out=set(), limit=None)
+        top = result["selected"][0]
+        self.assertEqual(top["task_id"], 101)
+        self.assertTrue(top["winnable"])
+        self.assertEqual(top["successes"], 1)
+        self.assertEqual(top["spec_failed"], 1)
+
+    def test_spec_failed_sorts_within_tier(self) -> None:
+        """同档内「规格错」次数多的题优先——M8 的靶点就是规格。"""
+        rows = [
+            # 202：1 次规格错
+            row(202, "gold_purchase", opened=("G8",)),
+            row(202, "wrong_purchase", opened=("G8",), target_asin_match=True),
+            # 201：3 次规格错
+            row(201, "gold_purchase", opened=("G9",)),
+            row(201, "wrong_purchase", opened=("G9",), target_asin_match=True),
+            row(201, "wrong_purchase", opened=("G9",), target_asin_match=True),
+            row(201, "wrong_purchase", opened=("G9",), target_asin_match=True),
+        ]
+        result = module.select(rows, held_out=set(), limit=None)
+        self.assertEqual([item["task_id"] for item in result["selected"]], [201, 202])
+        self.assertEqual(result["selected"][0]["spec_failed"], 3)
+
+    def test_all_failure_task_is_not_selectable(self) -> None:
+        """整题全失败的题天然进不了池（没有正样本可学），所以「赢过」恒为真。"""
+        rows = [
+            row(301, "wrong_purchase", opened=("G7",), target_asin_match=True),
+            row(301, "wrong_purchase", opened=("G7",), target_asin_match=True),
+        ]
+        result = module.select(rows, held_out=set(), limit=None)
+        self.assertEqual(result["selected"], [])
+        self.assertTrue(all(item["winnable"] for item in result["selected"]))
 
     def test_held_out_is_excluded(self) -> None:
         result = module.select(self.rows(), held_out={101}, limit=None)

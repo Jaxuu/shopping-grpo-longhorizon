@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import sys
 from collections import Counter
 from pathlib import Path
@@ -125,12 +124,19 @@ def classify_task(
     else:
         tier = "D"
 
+    successes = len(records) - len(failures)
     return {
         "task_id": int(records[0]["task_id"]) if str(records[0]["task_id"]).isdigit() else records[0]["task_id"],
         "tier": tier,
         "attempts": len(records),
         "failures": len(failures),
+        # 同一题是否至少成功过一次：决定「重新采样能不能收到正样本」的命中率。
+        # 163 题里 83 题赢过（50.9%），这 83 题才是高产出采集目标。
+        "successes": successes,
+        "winnable": successes > 0,
         "budget_failed": budget_failed,
+        # M8 真正的靶点：买对了商品但规格选错（`key_options` 未满），不是超支。
+        "spec_failed": buckets["bought_gold_failed_gate"],
         "bought_gold_failed_gate": buckets["bought_gold_failed_gate"],
         "saw_gold_bought_other": buckets["saw_gold_bought_other"],
         "close_substitute": close_substitute,
@@ -140,11 +146,15 @@ def classify_task(
 
 
 def _sort_key(item: Mapping[str, Any]) -> tuple:
-    """档位优先，其次「失败越多、超预算越集中」越靠前。"""
+    """档位优先；同档内先要有「这题赢过」，再看规格错得多不多。
+
+    M8 已定案：401 条「买对 gold 却只拿 partial」的唯一扣分项是 `key_options`，
+    所以排序不再看超预算，而是看「规格错」的集中度与重新采样的命中率。
+    """
     return (
         TIERS.index(str(item["tier"])),
-        -int(item["budget_failed"]),
-        -float(item["budget_share"]),
+        0 if item.get("winnable") else 1,
+        -int(item.get("spec_failed", 0)),
         -int(item["failures"]),
         str(item["task_id"]),
     )
@@ -203,7 +213,7 @@ def select(
 def render_report(result: Mapping[str, Any], *, source: str, limit: int | None) -> str:
     selected = result["selected"]
     lines: list[str] = []
-    lines.append("# M8 Step 1 采集目标（预算边缘题）")
+    lines.append("# M8 Step 1 采集目标（规格选错题）")
     lines.append("")
     lines.append(f"> 输入：`{source}`；held-out 已剔除 **{result['excluded_held_out']}** 题。")
     lines.append(
@@ -217,11 +227,11 @@ def render_report(result: Mapping[str, Any], *, source: str, limit: int | None) 
     lines.append("| 档 | 含义 | 题数 |")
     lines.append("|---|---|---:|")
     lines.append(
-        f"| **A** | 买对了商品、只是超支（只缺最后一道核价） | "
+        f"| **A** | **买对了商品，但规格选错/没选全**（M8 唯一靶点） | "
         f"{result['tiers'].get('A', 0)} |"
     )
     lines.append(
-        f"| **B** | 打开过正确商品，却买了 ≥0.70 的近似品 | "
+        f"| **B** | 打开过正确商品，却买了 ≥0.70 的近似品（无 A 证据时） | "
         f"{result['tiers'].get('B', 0)} |"
     )
     lines.append(
@@ -235,22 +245,30 @@ def render_report(result: Mapping[str, Any], *, source: str, limit: int | None) 
         lines.append("## 2. 入选明细（前 30）")
         lines.append("")
         lines.append(
-            "| task_id | 档 | 失败数 | 超预算 | 买对却超支 | 近似替代 | 没看到 |"
+            "| task_id | 档 | 赢过 | 失败数 | 规格错 | 超预算 | 近似替代 | 没看到 |"
         )
-        lines.append("|---|---|---:|---:|---:|---:|---:|")
+        lines.append("|---|---|---|---:|---:|---:|---:|---:|")
         for item in selected[:30]:
             lines.append(
-                f"| {item['task_id']} | **{item['tier']}** | {item['failures']} | "
-                f"{item['budget_failed']} | {item['bought_gold_failed_gate']} | "
+                f"| {item['task_id']} | **{item['tier']}** | "
+                f"{'是' if item.get('winnable') else '否'} | {item['failures']} | "
+                f"{item.get('spec_failed', 0)} | {item['budget_failed']} | "
                 f"{item['close_substitute']} | {item['never_saw_gold']} |"
             )
         lines.append("")
 
-        budget_values = [float(item["budget_share"]) for item in selected]
+        winnable = sum(1 for item in selected if item.get("winnable"))
+        spec = sum(int(item.get("spec_failed", 0)) for item in selected)
         lines.append("## 3. 质量检查")
         lines.append("")
         lines.append(
-            f"- 入选题里超预算失败占比中位数：**{statistics.median(budget_values):.1%}**"
+            f"- 入选题里「至少赢过一次」的：**{winnable}/{len(selected)}"
+            f"（{winnable / len(selected):.1%}）**"
+            "——这批重新采样能收到正样本，命中率最高"
+        )
+        lines.append(
+            f"- 入选题里「买对商品但规格错」的失败次数合计：**{spec}**"
+            "（M8 的唯一扣分项，见 `plans/m8-data-plan.md` §7.0.3）"
         )
         lines.append(
             f"- A 档占比：**{result['tiers'].get('A', 0) / max(sum(result['tiers'].values()), 1):.1%}**"
