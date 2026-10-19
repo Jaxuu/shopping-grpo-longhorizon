@@ -29,10 +29,18 @@ WAIT_MODEL_SECONDS="${WAIT_MODEL_SECONDS:-2400}"
 OUT_DIR="$ROOT/outputs/evaluation/$LABEL"
 LOG_DIR="$ROOT/outputs/logs"
 
-log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
-die() { printf '[%s] 失败：%s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
+# 脚本自己的输出也留一份：会话一旦退出，终端里的报错就看不见了，只能靠这个文件。
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_DIR/run.log") 2>&1
 
-mkdir -p "$LOG_DIR" "$OUT_DIR"
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+die() {
+  printf '[%s] 失败：%s\n' "$(date +%H:%M:%S)" "$*" >&2
+  printf '[%s] 本次日志已保存到 %s/run.log\n' "$(date +%H:%M:%S)" "$LOG_DIR" >&2
+  exit 1
+}
+
+mkdir -p "$OUT_DIR"
 
 echo "=================================================="
 echo " M9 诊断：买前至少打开 ${MIN_OPENED_BEFORE_BUY} 个候选"
@@ -54,7 +62,7 @@ if tmux has-session -t "$ENV_SESSION" 2>/dev/null; then
   log "tmux 会话 [$ENV_SESSION] 已存在，跳过启动"
 else
   tmux new-session -d -s "$ENV_SESSION" \
-    "cd '$ROOT' && bash scripts/start_environment.sh 2>&1 | tee '$LOG_DIR/env.log'"
+    "cd '$ROOT' && SHOPSIM_ENV_SLOTS='${SHOPSIM_ENV_SLOTS:-32}' bash scripts/start_environment.sh 2>&1 | tee '$LOG_DIR/env.log'"
   log "已在 tmux 会话 [$ENV_SESSION] 启动商店环境（日志 $LOG_DIR/env.log）"
 fi
 
@@ -66,6 +74,12 @@ for ((i = 1; i <= WAIT_ENV_SECONDS; i++)); do
     log "商店环境就绪（HTTP $code；404 属正常）"
     env_ready=1
     break
+  fi
+  # 会话提前消失 = 进程自己退了，不用等满
+  if ! tmux has-session -t "$ENV_SESSION" 2>/dev/null; then
+    echo "--- env.log 末尾 ---"
+    tail -20 "$LOG_DIR/env.log" 2>/dev/null
+    die "商店环境进程退出（tmux 会话 [$ENV_SESSION] 已消失）。若上面没有报错就突然结束，多半是内存不足被系统杀掉：用 free -g 看内存，再试 SHOPSIM_ENV_SLOTS=8"
   fi
   sleep 1
 done
