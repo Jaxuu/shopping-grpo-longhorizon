@@ -11,16 +11,16 @@
 #   # Ctrl+B 松手，再按 D 脱离
 #
 # 可调环境变量：
-#   MIN_OPENED_BEFORE_BUY=5          诊断开关（0=关闭）
-#   LABEL=m9-explore5                输出目录名 outputs/evaluation/<LABEL>
+#   MIN_OPENED_BEFORE_BUY=3          诊断开关（0=关闭）。**别超过 4**，原因见下面的步数预算。
+#   LABEL=m9-explore3                输出目录名 outputs/evaluation/<LABEL>
 #   MODEL=outputs/models/.../merged  权重目录
 #   GPU_MEM_UTIL=0.9                 vLLM 显存占比
 #   SKIP_PREFLIGHT=1                 跳过自检
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LABEL="${LABEL:-m9-explore5}"
-MIN_OPENED_BEFORE_BUY="${MIN_OPENED_BEFORE_BUY:-5}"
+LABEL="${LABEL:-m9-explore3}"
+MIN_OPENED_BEFORE_BUY="${MIN_OPENED_BEFORE_BUY:-3}"
 MODEL="${MODEL:-$ROOT/outputs/models/sft-b-curriculum/stage-c/merged}"
 ENV_SESSION="${ENV_SESSION:-env}"
 VLLM_SESSION="${VLLM_SESSION:-vllm}"
@@ -47,6 +47,23 @@ echo " M9 诊断：买前至少打开 ${MIN_OPENED_BEFORE_BUY} 个候选"
 echo " 权重：$MODEL"
 echo " 输出：$OUT_DIR"
 echo "=================================================="
+
+# 步数预算算术（这一条决定 k 能取多大，别凭感觉调）：
+#   环境侧 max_steps 硬冻结在 35，改 SHOP_MAX_STEPS 会直接抛 ValueError。
+#   实测这个模型对每个候选走 8 步仪式（open→select→features→prev→desc→prev→back→search），
+#   模型不听话时的步数 = 1 + 8k + 1；听话走"省步数走法"时 = 1 + 3k + 2。
+#     k=3 → 26 / 12 步（稳）      k=4 → 34 / 15 步（险）
+#     k=5 → 42 / 17 步（不听话必死，上一轮 6 题 0 成功就是这么来的）
+ritual_steps=$(( 1 + 8 * MIN_OPENED_BEFORE_BUY + 1 ))
+cheap_steps=$(( 1 + 3 * MIN_OPENED_BEFORE_BUY + 2 ))
+log "步数预算：上限 35；不听话约 ${ritual_steps} 步，听话约 ${cheap_steps} 步"
+if (( ritual_steps > 35 )); then
+  log "警告：k=${MIN_OPENED_BEFORE_BUY} 在模型不按提示省步数时会超出 35 步预算，"
+  log "      那样测出来的是「步数烧光」而不是「探索有没有用」。推荐 k=3。"
+fi
+if (( MIN_OPENED_BEFORE_BUY > 0 && MIN_OPENED_BEFORE_BUY < 2 )); then
+  die "MIN_OPENED_BEFORE_BUY 只能是 0 或 >=2"
+fi
 
 # 克隆机/重启后权重路径可能不同：默认路径不在就自己找，别让人猜。
 if [[ ! -f "$MODEL/config.json" ]]; then

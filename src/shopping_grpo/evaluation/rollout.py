@@ -543,13 +543,30 @@ def _is_infrastructure_failure(trajectory):
 
 
 def _candidate_hint(reason, min_opened_before_buy, available_candidates, opened_count):
-    """当 ``buy_now`` 因候选数不足被拒时，告诉模型怎么满足要求（不给答案）。"""
+    """当 ``buy_now`` 因候选数不足被拒时，告诉模型怎么满足要求（不给答案）。
+
+    必须同时讲**怎么省步数**，否则这个诊断测的是步数耗尽、不是探索收益。
+    实测（Final-200 基线 task 7684，无守卫也这样）模型对每个候选都走完整仪式：
+    ``open → select_option → view_features → prev → view_description → prev →
+    back_to_search → search``，**8 步一个候选**。而 ``max_steps`` 在环境侧硬冻结在 35
+    （``configs/environment.json`` 的 ``termination.max_steps``，``SHOP_MAX_STEPS``
+    设成别的值会直接抛 ValueError），所以 k=5 需要 42 步 ⇒ 必然 ``max_steps``。
+
+    提示里的走法每个候选只要 3 步（back → search → open），既满足守卫也不会触发
+    环境侧的 ``no_progress_limit=4``：back 与同 query 的 search 各记 1 次无进展，
+    随后 open 新商品即清零，峰值 2 < 4。
+    """
     if not str(reason).startswith("insufficient_candidates_compared:"):
         return None
     required = required_candidate_opens(min_opened_before_buy, available_candidates)
     return (
         f"购买前必须先比较至少 {required} 个不同候选，当前只打开过 {opened_count} 个。"
-        "请调用 back_to_search 回到搜索结果页，再 open_product 另一个候选的 ASIN。"
+        "省步数的走法（每个候选 3 步）：back_to_search → search_products（沿用同一个 query）"
+        "→ open_product（结果里的下一个 ASIN）。"
+        "看候选时不要 select_option、不要 view_features / view_description / prev_page，"
+        "打开看一眼就离开。"
+        f"凑满 {required} 个后立刻 buy_now，不要再打开更多候选；"
+        "只有最终要买的那个候选才 select_option。"
     )
 
 

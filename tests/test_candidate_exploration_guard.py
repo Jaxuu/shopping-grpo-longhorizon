@@ -138,6 +138,25 @@ def test_rollout_hint_helper_matches_guard_reason():
     assert _candidate_hint("click_not_in_previous_observation", 5, 20, 1) is None
 
 
+def test_rollout_hint_teaches_step_economy():
+    """守卫提示必须同时教省步数，否则 k=5 会烧光 35 步（第一轮 6 题 0 成功的原因）。"""
+    from shopping_grpo.evaluation.rollout import _candidate_hint
+
+    hint = _candidate_hint("insufficient_candidates_compared:1/3", 3, 20, 1)
+    # 每个候选 3 步的走法
+    assert "back_to_search" in hint
+    assert "search_products" in hint
+    assert "open_product" in hint
+    # 明确劝退仪式动作
+    assert "不要 select_option" in hint
+    assert "view_features" in hint
+    # 凑满就买，别继续开
+    assert "立刻 buy_now" in hint
+    # 仍然不许泄露答案
+    assert "11111111" not in hint
+    assert "高档" not in hint
+
+
 class _FakeClient:
     """按脚本返回预设动作，把 buy_now 放在第一个候选之后。"""
 
