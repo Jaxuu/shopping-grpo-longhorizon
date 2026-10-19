@@ -91,6 +91,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _build_candidates(tasks, attempts_per_task, completed):
+    """按「轮次优先」展开待采样的 (task, attempt_index)。
+
+    先跑所有题的第 0 次，再跑所有题的第 1 次……而不是先跑完一道题的所有次。
+    原因：`target_accepted` 早停会按这个顺序消费候选，题优先会让采到的数据
+    集中在前几道题上；M8 要覆盖不同商品的规格轴，必须把题打散。
+    """
+    return [
+        (task, index)
+        for index in range(int(attempts_per_task))
+        for task in tasks
+        if (int(task["task_id"]), index) not in completed
+    ]
+
+
 def collect_until_target(
     *,
     tasks,
@@ -111,12 +126,7 @@ def collect_until_target(
         raise ValueError("workers must be at least 1")
     accepted = _accepted_count(output_path, excluded_task_ids)
     completed = completed_task_attempts(output_path)
-    candidates = [
-        (task, attempt_index)
-        for task in tasks
-        for attempt_index in range(int(attempts_per_task))
-        if (int(task["task_id"]), attempt_index) not in completed
-    ]
+    candidates = _build_candidates(tasks, attempts_per_task, completed)
     candidate_iter = iter(candidates)
     pending = {}
     written = []

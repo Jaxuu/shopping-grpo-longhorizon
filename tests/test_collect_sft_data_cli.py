@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.collect_sft_data import (
+    _build_candidates,
     _validate_args,
     batch_paths,
     collect_until_target,
@@ -14,6 +15,27 @@ from scripts.collect_sft_data import (
 
 
 class CollectSftDataCliTests(unittest.TestCase):
+    def test_candidates_are_interleaved_across_tasks(self):
+        """轮次优先：先所有题的第 0 次，再所有题的第 1 次。
+
+        题优先配合 `target_accepted` 早停，会让采集结果集中在前几道题上。
+        """
+        tasks = [{"task_id": 1}, {"task_id": 2}, {"task_id": 3}]
+        order = [
+            (task["task_id"], index)
+            for task, index in _build_candidates(tasks, 2, set())
+        ]
+        self.assertEqual(order, [(1, 0), (2, 0), (3, 0), (1, 1), (2, 1), (3, 1)])
+
+    def test_candidates_skip_completed_attempts(self):
+        tasks = [{"task_id": 1}, {"task_id": 2}]
+        order = [
+            (task["task_id"], index)
+            for task, index in _build_candidates(tasks, 2, {(1, 0)})
+        ]
+        self.assertEqual(order, [(2, 0), (1, 1), (2, 1)])
+
+
     def test_defaults_match_the_current_teacher_collection_contract(self):
         with patch.object(sys, "argv", ["collect_sft_data.py", "--tasks", "tasks.jsonl"]):
             args = parse_args()
