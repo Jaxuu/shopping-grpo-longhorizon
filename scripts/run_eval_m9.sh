@@ -100,7 +100,10 @@ fi
 log "等待商店环境就绪（最多 ${WAIT_ENV_SECONDS}s）…"
 env_ready=0
 for ((i = 1; i <= WAIT_ENV_SECONDS; i++)); do
-  code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:5700/ 2>/dev/null || echo 000)
+  # 注意：curl 连接失败时 -w 已经会打印 000，不要再 `|| echo 000`，
+  # 否则会拼成 "000000"，让下面的判断把"未就绪"误当成"已就绪"。
+  code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:5700/ 2>/dev/null)
+  [[ -z "$code" ]] && code=000
   if [[ "$code" != "000" ]]; then
     log "商店环境就绪（HTTP $code；404 属正常）"
     env_ready=1

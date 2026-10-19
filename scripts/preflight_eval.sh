@@ -104,7 +104,9 @@ fi
 
 echo "== 7. 端口 =="
 # 商店环境：根路径 404 就是"活着"的正常信号。
-env_code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:5700/" 2>/dev/null || echo 000)
+# curl 连接失败时 -w 已经输出 000，不能再 `|| echo 000`（会拼成 000000 骗过判断）。
+env_code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:5700/" 2>/dev/null)
+env_code=${env_code:-000}
 if [[ "$env_code" == "000" ]]; then
   warn "商店环境未启动（:5700）：bash scripts/start_environment.sh"
 else
