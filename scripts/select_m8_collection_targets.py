@@ -14,7 +14,8 @@ M8-B 实测（`selection_vs_retrieval.md`）与硬门分布（`wp_variance.md` �
 
 分档（优先级递减，互斥，取最高档）
 ----------------------------------
-* **A 档**：组内出现过 `bought_gold_failed_gate`（买对了商品、只是超支）。
+* **A 档**：组内出现过 `bought_gold_failed_gate`（买对了商品，但规格选错/没选全）。
+  M8 已定案：这类失败的唯一扣分项是 `key_options`，见 `plans/m8-data-plan.md` §7.0.3。
   最直接：正确商品已经找得到，只缺最后一道核价。
 * **B 档**：组内出现过 `saw_gold_bought_other` 且替代品 `weighted_score ≥ 0.70`
   （打开过正确商品，却买了几乎一样的另一个）。
