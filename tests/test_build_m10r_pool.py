@@ -173,6 +173,27 @@ class DescribeRowTest(unittest.TestCase):
         row = make_row(3, [(1, "A")], ["Z"])
         self.assertIsNone(module.describe_row(row)["rank"])
 
+    def test_paging_flag(self) -> None:
+        """翻页示范必须单独可数：A 桶只能靠它救，混在「名次≥2」里会看不见。"""
+        row = make_row(4, [(1, "A"), (25, "G")], ["G"])
+        self.assertFalse(module.describe_row(row)["paging"])
+        row["messages"].insert(
+            4,
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "n1",
+                        "type": "function",
+                        "function": {"name": "next_page", "arguments": "{}"},
+                    }
+                ],
+            },
+        )
+        row["messages"].insert(5, {"role": "tool", "tool_call_id": "n1", "content": "ok"})
+        self.assertTrue(module.describe_row(row)["paging"])
+
 
 class RankBucketTest(unittest.TestCase):
     def test_boundaries(self) -> None:

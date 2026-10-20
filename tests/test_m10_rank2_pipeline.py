@@ -108,5 +108,60 @@ class TargetPickTest(unittest.TestCase):
             builder.pick_task_ids(total=5, used={1, 2, 3}, limit=3, seed=1)
 
 
+class UsesPagingTest(unittest.TestCase):
+    def test_next_page_counts(self) -> None:
+        row = {"steps": [{"tool_name": "next_page", "parameters": {}}]}
+        self.assertTrue(module.uses_paging(row))
+
+    def test_prev_page_does_not_count(self) -> None:
+        """`prev_page` 实测 2,032 次几乎全是「从详情页返回列表」，不是翻搜索结果页。
+
+        把它算成翻页会把示范率从 0.24% 虚报成 87%，据此会误判「A 桶已覆盖」。
+        """
+        row = {"steps": [{"tool_name": "prev_page", "parameters": {}}]}
+        self.assertFalse(module.uses_paging(row))
+
+    def test_search_alone_does_not_count(self) -> None:
+        row = {"steps": [{"tool_name": "search_products", "parameters": {"query": "x"}}]}
+        self.assertFalse(module.uses_paging(row))
+
+
+class SummarizePagingTest(unittest.TestCase):
+    """留下的样本里「必须翻页才看得到」的条数必须单独数出来。
+
+    A 桶 20 题就是这一块；把它混进 383 里当"已覆盖"，会让下一轮误以为
+    翻页示范够了。所以 `kept_beyond_first_page` / `kept_with_paging` 单独成键。
+    """
+
+    def row(self, task_id: int, rank: int, paging: bool) -> dict:
+        steps = [
+            {
+                "tool_name": "search_products",
+                "parameters": {"query": "x"},
+                "observation": search_observation([(rank, "G1")]),
+            }
+        ]
+        if paging:
+            steps.append({"tool_name": "next_page", "parameters": {}, "observation": ""})
+        steps.append({"tool_name": "open_product", "parameters": {"asin": "G1"}})
+        steps.append({"tool_name": "buy_now", "parameters": {}})
+        return {
+            "task_id": task_id,
+            "steps": steps,
+            "terminal_result": {"goal": {"asin": "G1"}},
+        }
+
+    def test_counts_beyond_first_page(self) -> None:
+        kept = [self.row(1, 25, True), self.row(2, 3, False)]
+        stats = module.summarize(kept, kept, kept)
+        self.assertEqual(stats["kept_beyond_first_page"], 1)
+        self.assertEqual(stats["kept_with_paging"], 1)
+
+    def test_rank_20_is_still_first_page(self) -> None:
+        kept = [self.row(1, 20, False)]
+        stats = module.summarize(kept, kept, kept)
+        self.assertEqual(stats["kept_beyond_first_page"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

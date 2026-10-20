@@ -58,6 +58,11 @@ from scripts.prepare_sft_curriculum import _validate_row  # noqa: E402
 SFT = ROOT / "data" / "sft_pure_v4"
 SEARCH_ROW = re.compile(r"^(?P<rank>\d+)\|(?P<asin>[^|\n]+)\|", re.MULTILINE)
 SEARCH_PAGE_MARKER = "page_type: search_results"
+#: 只有 `next_page` 算「翻页示范」。
+#: ⚠️ `prev_page` 名字里也有 page，但实测 2,032 次几乎全是「从详情页/信息子页返回列表」
+#: （`before_page_type=product_detail|information_subpage`），不是翻搜索结果页。
+#: 把它算进来会把翻页示范从 14 条虚报成 1,089 条。
+PAGING_TOOLS = frozenset({"next_page"})
 SFT_ROW_KEYS = {"trajectory_id", "task_id", "messages", "tools"}
 REPORT_SCHEMA = "shopping-m10r-pool-v1"
 
@@ -147,8 +152,9 @@ def opened_asins(messages: list[dict]) -> list[str]:
 
 
 def describe_row(row: dict) -> dict:
-    """一条 SFT 行的名次画像：买到谁、名次多少、开过几个商品。"""
+    """一条 SFT 行的名次画像：买到谁、名次多少、开过几个商品、有没有翻页。"""
     messages = row.get("messages") or []
+    calls = tool_calls(messages)
     bought = purchased_asin(messages)
     ranks = seen_ranks(messages)
     opened = opened_asins(messages)
@@ -157,7 +163,10 @@ def describe_row(row: dict) -> dict:
         "bought": bought,
         "rank": ranks.get(bought) if bought else None,
         "distinct_opens": len(set(opened)),
-        "steps": len(tool_calls(messages)),
+        "steps": len(calls),
+        # A 桶（gold 在第 21 名以后）只能靠翻页救；池子里有多少条翻页示范必须单列，
+        # 否则会被「名次≥2」这个大数字盖住，误以为已经覆盖。
+        "paging": any(name in PAGING_TOOLS for name, _ in calls),
     }
 
 
@@ -335,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
         "comparison_rows": sum(
             1 for p in final_profiles if p["distinct_opens"] >= 2 and p["rank"] and p["rank"] >= 2
         ),
+        "paging_rows": sum(1 for p in final_profiles if p["paging"]),
+        "paging_rows_in_increment": sum(1 for p in increment_profiles if p["paging"]),
+        "beyond_first_page_rows": sum(
+            1 for p in final_profiles if p["rank"] is not None and p["rank"] > 20
+        ),
         "distinct_opens_distribution": {str(k): v for k, v in sorted(opens.items())},
         "mean_steps": sum(steps) / len(steps) if steps else 0.0,
         "increment_rejected": rejected,
@@ -358,6 +372,11 @@ def main(argv: list[str] | None = None) -> int:
         f"（{mix['rank_ge2']} / {mix['rank_ge2'] + mix['rank1_kept']}）"
     )
     print(f"  其中「开≥2 且名次≥2」的对照样本：{report['comparison_rows']} 条")
+    print(
+        f"  翻页示范：{report['paging_rows']} 条"
+        f"（新增贡献 {report['paging_rows_in_increment']} 条）；"
+        f"gold 在第 21 名以后：{report['beyond_first_page_rows']} 条"
+    )
     print("  名次分布：" + "，".join(f"{k} {v}" for k, v in report["rank_distribution"].items()))
     print(f"  平均步数 {report['mean_steps']:.1f}")
     print(f"  待标注难度标签：{len(pending_labels)} 条")

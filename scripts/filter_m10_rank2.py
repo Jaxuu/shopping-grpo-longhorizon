@@ -41,6 +41,12 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 搜索结果行首的 `rank|asin|`。投影截断只影响后半段字段，不影响这两个。
 SEARCH_ROW = re.compile(r"^(?P<rank>\d+)\|(?P<asin>[^|\n]+)\|", re.MULTILINE)
 
+#: 只有 `next_page` 算「翻页示范」。
+#: ⚠️ `prev_page` 名字里也有 page，但实测 2,032 次几乎全是「从详情页/信息子页返回列表」，
+#: 不是翻搜索结果页；把它算进来会把翻页示范从 14 条虚报成 1,089 条。
+PAGING_TOOLS = frozenset({"next_page"})
+FIRST_PAGE_END = 20
+
 
 def load_jsonl(path: Path) -> list[dict]:
     rows: list[dict] = []
@@ -78,6 +84,13 @@ def opened_asins(trajectory: dict) -> list[str]:
     ]
 
 
+def uses_paging(trajectory: dict) -> bool:
+    """老师有没有真的翻页（`next_page` / `prev_page` 都是无参数工具）。"""
+    return any(
+        step.get("tool_name") in PAGING_TOOLS for step in trajectory.get("steps") or []
+    )
+
+
 def is_kept(rank: int | None, min_rank: int, max_rank: int = 0) -> bool:
     """名次条件：必须出现过（不是 None），且 ≥min_rank；max_rank=0 表示不限。"""
     if rank is None or rank < min_rank:
@@ -93,6 +106,18 @@ def summarize(rows: list[dict], accepted: list[dict], kept: list[dict]) -> dict:
         gold = ((row.get("terminal_result") or {}).get("goal") or {}).get("asin")
         rank = gold_rank(row, str(gold)) if gold else None
         ranks["未出现" if rank is None else rank] += 1
+
+    # 留下的样本里，「必须翻页才看得到」的有多少 —— 这是 A 桶（gold 在第 21 名以后）
+    # 唯一能靠数据补上的那一块，必须单独数出来，不能混在 383 里当"已覆盖"。
+    kept_beyond_first_page = 0
+    kept_paging = 0
+    for row in kept:
+        gold = ((row.get("terminal_result") or {}).get("goal") or {}).get("asin")
+        rank = gold_rank(row, str(gold)) if gold else None
+        if rank is not None and rank > FIRST_PAGE_END:
+            kept_beyond_first_page += 1
+        if uses_paging(row):
+            kept_paging += 1
 
     opened_counts = collections.Counter(len(opened_asins(row)) for row in kept)
     steps = [len(row.get("steps") or []) for row in kept]
@@ -112,6 +137,8 @@ def summarize(rows: list[dict], accepted: list[dict], kept: list[dict]) -> dict:
         },
         "kept_single_open": opened_counts.get(1, 0),
         "kept_multi_open": sum(v for k, v in opened_counts.items() if k >= 2),
+        "kept_beyond_first_page": kept_beyond_first_page,
+        "kept_with_paging": kept_paging,
         "kept_mean_steps": (sum(steps) / len(steps)) if steps else 0.0,
         "kept_tasks": len({str(row.get("task_id")) for row in kept}),
     }
@@ -168,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  占已成功轨迹: {stats['kept_share_of_accepted']:.1%}")
         print(f"  留下题数: {stats['kept_tasks']}；平均步数 {stats['kept_mean_steps']:.1f}")
         print(f"  只开 1 个: {stats['kept_single_open']}；开 ≥2 个: {stats['kept_multi_open']}")
+        print(
+            f"  gold 在第 21 名以后（必须翻页才看得到）: {stats['kept_beyond_first_page']}；"
+            f"真的翻了页: {stats['kept_with_paging']}"
+        )
         print("  已成功轨迹的 gold 名次分布（前 10）:")
         for rank, count in list(stats["rank_distribution_of_accepted"].items())[:10]:
             print(f"    第 {rank} 名: {count}")
