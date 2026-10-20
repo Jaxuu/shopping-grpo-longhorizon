@@ -6,10 +6,13 @@
 #   2. label   —— 给新题补离线难度标签（课程清单要用）
 #   3. manifest—— 生成课程清单（含与评测集的零重叠校验）
 #
-# 增量来源有两批，存在哪批并哪批：
-#   outputs/m10-rank2/kept.jsonl   采集筛出的「gold 名次≥2」
-#   outputs/m10-paging/kept.jsonl  脚本合成的「翻页才找到」（A 桶）
-# 可用 RANK2_INCREMENT / PAGING_INCREMENT 覆盖。
+# 增量来源有四批，存在哪批并哪批：
+#   outputs/m10-rank2/kept.jsonl    采集筛出的「gold 名次≥2」
+#   outputs/m10-paging/kept.jsonl   合成「翻页才找到」
+#   outputs/m10-requery/kept.jsonl  合成「换查询重搜」
+#   outputs/m10-compare/kept.jsonl  合成「先开第 1 名再换」
+# 可用 RANK2_INCREMENT / PAGING_INCREMENT / REQUERY_INCREMENT /
+# COMPARE_INCREMENT 覆盖。
 #
 # 用法：
 #   bash scripts/run_m10r_build.sh                  # 默认不降采样（第 1 名占 52%）
@@ -32,6 +35,8 @@ PY="${PY:-${ROOT}/.venv/bin/python}"
 INCREMENT_SOURCES=(
   "${RANK2_INCREMENT:-outputs/m10-rank2/kept.jsonl}"
   "${PAGING_INCREMENT:-outputs/m10-paging/kept.jsonl}"
+  "${REQUERY_INCREMENT:-outputs/m10-requery/kept.jsonl}"
+  "${COMPARE_INCREMENT:-outputs/m10-compare/kept.jsonl}"
 )
 OUT_DIR="${OUT_DIR:-data/sft_m10r}"
 POOL="${POOL:-data/sft_pure_v4/all.jsonl}"
