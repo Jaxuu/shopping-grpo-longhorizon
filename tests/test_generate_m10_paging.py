@@ -149,6 +149,20 @@ class MatchOptionTest(unittest.TestCase):
     def test_prefix_is_not_a_match(self) -> None:
         self.assertIsNone(module.match_option("三色聚光灯", self.options))
 
+    def test_prefers_clickable_spelling(self) -> None:
+        """归一后相同的两个写法，必须挑页脚按钮里真有的那个，否则点击被拒。"""
+        options = {"颜色分类": ["1 | 2中阮", "1/2中阮"]}
+        clickable = {"1/2中阮"}
+        self.assertEqual(
+            module.match_option("1/2中阮", options, clickable=clickable), "1/2中阮"
+        )
+
+    def test_falls_back_when_no_clickable_spelling(self) -> None:
+        options = {"颜色分类": ["1 | 2中阮"]}
+        self.assertEqual(
+            module.match_option("1/2中阮", options, clickable={"别的"}), "1 | 2中阮"
+        )
+
     def test_unknown_returns_none(self) -> None:
         self.assertIsNone(module.match_option("不存在", self.options))
 

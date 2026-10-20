@@ -132,14 +132,27 @@ def available_options(observation: str) -> dict[str, list[str]]:
     }
 
 
-def match_option(required: str, options: dict[str, list[str]]) -> str | None:
-    """把「要求的规格值」对到页面上真实存在的那个字符串（大小写/斜杠/空格归一后比）。"""
+def match_option(
+    required: str, options: dict[str, list[str]], *, clickable: set[str] | None = None
+) -> str | None:
+    """把「要求的规格值」对到页面上真实存在的那个字符串（大小写/斜杠/空格归一后比）。
+
+    ``clickable`` 给了页脚按钮列表时，优先返回**确实可点**的那个写法：
+    `available_options` 与页脚按钮偶尔不是同一个字符串（实测 2.79% 的规格值
+    只在前者里），拿前者去点会被动作闸门拒成
+    ``click_not_in_previous_observation``。
+    """
     target = norm(required)
+    fallback: str | None = None
     for values in options.values():
         for value in values:
-            if norm(value) == target:
+            if norm(value) != target:
+                continue
+            if clickable is None or value in clickable:
                 return value
-    return None
+            if fallback is None:
+                fallback = value
+    return fallback
 
 
 def tool_call(name: str, arguments: dict, call_id: str) -> dict:
@@ -288,6 +301,7 @@ def _rank_of(searcher, query: str, asin: str) -> int | None:
 def generate(targets: list[dict], *, base_url: str, out_dir: Path, max_pages: int) -> dict:
     """连环境跑脚本化轨迹。逐题校验：翻页后真的看见 gold、终局真的是 gold_purchase。"""
     from shopping_grpo.collection.sft import acceptance_reasons, build_sft_row  # noqa: PLC0415
+    from shopping_grpo.environment.actions import clickable_buttons  # noqa: PLC0415
     from shopping_grpo.environment.client import ShopAgentEnv  # noqa: PLC0415
     from shopping_grpo.environment.observation import render_structured_observation  # noqa: PLC0415
     from shopping_grpo.environment.tools import tool_call_to_action  # noqa: PLC0415
@@ -359,7 +373,9 @@ def generate(targets: list[dict], *, base_url: str, out_dir: Path, max_pages: in
                 for required in goal_options:
                     if failure is not None:
                         break
-                    actual = match_option(required, options)
+                    actual = match_option(
+                        required, options, clickable=set(clickable_buttons(observation))
+                    )
                     if actual is None:
                         failure = f"required_option_missing:{required}"
                         break
