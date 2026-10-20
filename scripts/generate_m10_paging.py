@@ -18,7 +18,7 @@ Step 2 实测：老师**自己从不翻页**（6 题 gold 在 21–99 名、翻�
 
 两步走
 ------
-1. ``--mode plan``（纯 CPU，不连环境）：在全语料里找 gold 名次 **21–60** 的题，
+1. ``--mode plan``（纯 CPU，不连环境）：在全语料里找 gold 名次 **21–120** 的题，
    记下把 gold 排到该名次的那个查询词，写 ``data/collection/m10_paging_targets.jsonl``。
 2. ``--mode generate``（需要环境服务）：对每道题执行
    ``search → next_page×k → open → select_option×m → buy_now``，
@@ -59,10 +59,16 @@ SEARCH_ROW = re.compile(r"^(?P<rank>\d+)\|(?P<asin>\d{8,12})\|", re.MULTILINE)
 AVAILABLE_OPTIONS = re.compile(r"^available_options: (?P<payload>.+)$", re.MULTILINE)
 PAGE_MARKER = "page_type: search_results"
 
-#: 第一页渲染前 20 名；21–60 名翻 1–2 页可达。
+#: 第一页只渲染前 20 名。评测 A 桶那 18 道可达题里 gold 最远在第 114 名，
+#: 所以上限要盖到 120（= 6 页），否则示范只教到「翻两页」，深题照样放弃。
 MIN_RANK = 21
-MAX_RANK = 60
-MAX_PAGES = 4
+MAX_RANK = 120
+MAX_PAGES = 6
+
+
+def pages_needed(rank: int, *, page_size: int = 20) -> int:
+    """gold 在第 rank 名时，从第一页开始要翻几页才能看见它。"""
+    return max(1, -(-int(rank) // int(page_size)))
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -82,9 +88,11 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     )
 
 
-def in_paging_band(rank: int | None) -> bool:
-    """gold 在第 21–60 名：第一页看不见，翻 1–2 页可达。"""
-    return rank is not None and MIN_RANK <= rank <= MAX_RANK
+def in_paging_band(
+    rank: int | None, *, min_rank: int = MIN_RANK, max_rank: int = MAX_RANK
+) -> bool:
+    """gold 在 min_rank–max_rank 名：第一页看不见，翻页可达。"""
+    return rank is not None and min_rank <= rank <= max_rank
 
 
 def best_candidate(candidates: list[tuple[str, int | None]]) -> tuple[str, int] | None:
@@ -213,7 +221,9 @@ def build_trajectory(
     }
 
 
-def plan_targets(*, limit: int, index: Path) -> list[dict]:
+def plan_targets(
+    *, limit: int, index: Path, min_rank: int = MIN_RANK, max_rank: int = MAX_RANK
+) -> list[dict]:
     """离线选题：gold 名次 21–60 的未使用商品。"""
     import select_m10_collection_targets as selection  # noqa: PLC0415
 
@@ -244,8 +254,9 @@ def plan_targets(*, limit: int, index: Path) -> list[dict]:
             histogram["miss"] += 1
             continue
         query, rank = picked
-        histogram["21-60" if in_paging_band(rank) else "out"] += 1
-        if not in_paging_band(rank):
+        band = in_paging_band(rank, min_rank=min_rank, max_rank=max_rank)
+        histogram[f"{min_rank}-{max_rank}" if band else "out"] += 1
+        if not band:
             continue
         chosen.append(
             {
@@ -253,6 +264,7 @@ def plan_targets(*, limit: int, index: Path) -> list[dict]:
                 "asin": asin,
                 "query": query,
                 "rank": int(rank),
+                "pages": pages_needed(rank),
                 "instruction": str(instruction.get("instruction") or ""),
             }
         )
@@ -412,14 +424,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:5700")
     parser.add_argument("--limit", type=int, default=0, help="plan: 最多选多少题；generate: 最多跑多少题")
     parser.add_argument("--max-pages", type=int, default=MAX_PAGES)
+    parser.add_argument("--min-rank", type=int, default=MIN_RANK)
+    parser.add_argument("--max-rank", type=int, default=MAX_RANK)
     args = parser.parse_args(argv)
 
     if args.mode == "plan":
-        chosen = plan_targets(limit=args.limit, index=args.index)
+        if args.max_rank < args.min_rank:
+            raise SystemExit("--max-rank 不能小于 --min-rank")
+        chosen = plan_targets(
+            limit=args.limit,
+            index=args.index,
+            min_rank=args.min_rank,
+            max_rank=args.max_rank,
+        )
         write_jsonl(args.targets, chosen)
         ranks = collections.Counter(row["rank"] // 10 * 10 for row in chosen)
+        pages = collections.Counter(row["pages"] for row in chosen)
         print(f"写入 {args.targets}：{len(chosen)} 题")
         print(f"名次分布（按 10 分段）：{dict(sorted(ranks.items()))}")
+        print(f"需翻页数分布：{dict(sorted(pages.items()))}")
         return 0
 
     if not args.targets.is_file():
@@ -427,6 +450,12 @@ def main(argv: list[str] | None = None) -> int:
     targets = read_jsonl(args.targets)
     if args.limit:
         targets = targets[: args.limit]
+    deepest = max((pages_needed(int(t["rank"])) for t in targets), default=1)
+    if deepest > args.max_pages:
+        raise SystemExit(
+            f"目标里有 gold 在第 {deepest * 20} 名之后的题，需要翻 {deepest} 页，"
+            f"但 --max-pages={args.max_pages}；要么加 --max-pages，要么重跑 plan 收窄 --max-rank"
+        )
     summary = generate(
         targets, base_url=args.base_url, out_dir=args.out_dir, max_pages=args.max_pages
     )
