@@ -29,6 +29,7 @@ Step 2 实测：老师**自己从不翻页**（6 题 gold 在 21–99 名、翻�
     .venv/Scripts/python.exe scripts/generate_m10_paging.py --mode plan
     .venv/Scripts/python.exe scripts/generate_m10_paging.py --mode generate --limit 3
     .venv/Scripts/python.exe scripts/generate_m10_paging.py --mode generate
+    .venv/Scripts/python.exe scripts/generate_m10_paging.py --mode generate --resume
 """
 
 from __future__ import annotations
@@ -77,6 +78,13 @@ def read_jsonl(path: Path) -> list[dict]:
         for line in Path(path).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def count_lines(path: Path) -> int:
+    if not Path(path).is_file():
+        return 0
+    with Path(path).open(encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -298,8 +306,30 @@ def _rank_of(searcher, query: str, asin: str) -> int | None:
     return None
 
 
-def generate(targets: list[dict], *, base_url: str, out_dir: Path, max_pages: int) -> dict:
-    """连环境跑脚本化轨迹。逐题校验：翻页后真的看见 gold、终局真的是 gold_purchase。"""
+def can_page_forward(observation: str, clickable_buttons) -> bool:
+    """当前页是否真的还有「下一页」。与动作闸门同口径（casefold 后比）。"""
+    return "next >" in {button.casefold() for button in clickable_buttons(observation)}
+
+
+def generate(
+    targets: list[dict],
+    *,
+    base_url: str,
+    out_dir: Path,
+    max_pages: int,
+    resume: bool = False,
+) -> dict:
+    """连环境跑脚本化轨迹。逐题校验：翻页后真的看见 gold、终局真的是 gold_purchase。
+
+    三条稳健性约定，都是踩过坑加上的：
+
+    1. **每一步都看 ``done``**：环境可能在任何一步提前结束（翻到最后一页还点
+       下一页、检索无结果等）。结束时 ``step`` 会抛
+       ``Environment is already done``，把整批任务带崩。
+    2. **翻页前先看页脚有没有「下一页」**，没有就不点。
+    3. **逐条落盘**：结果立刻追加写盘，单题异常只记一条拒绝原因，不中断整批。
+       ``resume=True`` 时跳过已完成的 task_id。
+    """
     from shopping_grpo.collection.sft import acceptance_reasons, build_sft_row  # noqa: PLC0415
     from shopping_grpo.environment.actions import clickable_buttons  # noqa: PLC0415
     from shopping_grpo.environment.client import ShopAgentEnv  # noqa: PLC0415
@@ -310,116 +340,179 @@ def generate(targets: list[dict], *, base_url: str, out_dir: Path, max_pages: in
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_path = out_dir / "raw.jsonl"
     kept_path = out_dir / "kept.jsonl"
+    reject_path = out_dir / "rejections.jsonl"
+
+    done_ids: set[int] = set()
+    if resume:
+        for path in (raw_path, reject_path):
+            if path.is_file():
+                done_ids |= {int(row["task_id"]) for row in read_jsonl(path)}
+    else:
+        for path in (raw_path, kept_path, reject_path):
+            path.write_text("", encoding="utf-8", newline="\n")
+
     rejections: list[dict] = []
-    raw_rows: list[dict] = []
-    kept_rows: list[dict] = []
+    counts = collections.Counter()
 
-    for target in targets:
-        task_id = int(target["task_id"])
-        gold = str(target["asin"])
-        executed: list[dict] = []
-        terminal: dict = {}
-        failure: str | None = None
+    def emit(handle, row: dict) -> None:
+        handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
 
-        def run(env, name: str, arguments: dict) -> dict:
-            call = tool_call(name, arguments, f"c{len(executed)}")
-            action = tool_call_to_action(name, arguments)
-            result = env.step(action)
-            if result.get("observation_state") is not None:
-                observation = render_structured_observation(result["observation_state"])
-            else:
-                observation = result.get("instruction", result.get("observation", ""))
-            executed.append(
-                {
-                    "tool_call": call,
-                    "tool_name": name,
-                    "parameters": arguments,
-                    "env_action": action,
-                    "observation": observation,
-                    "reward": float(result.get("reward", 0.0)),
-                    "done": bool(result.get("done", False)),
-                }
+    raw_handle = raw_path.open("a", encoding="utf-8", newline="\n")
+    kept_handle = kept_path.open("a", encoding="utf-8", newline="\n")
+    reject_handle = reject_path.open("a", encoding="utf-8", newline="\n")
+    try:
+        for position, target in enumerate(targets, start=1):
+            task_id = int(target["task_id"])
+            if task_id in done_ids:
+                continue
+            gold = str(target["asin"])
+            executed: list[dict] = []
+            terminal: dict = {}
+            instruction = ""
+            failure: str | None = None
+
+            def run(env, name: str, arguments: dict) -> dict:
+                call = tool_call(name, arguments, f"c{len(executed)}")
+                action = tool_call_to_action(name, arguments)
+                result = env.step(action)
+                if result.get("observation_state") is not None:
+                    observation = render_structured_observation(result["observation_state"])
+                else:
+                    observation = result.get("instruction", result.get("observation", ""))
+                executed.append(
+                    {
+                        "tool_call": call,
+                        "tool_name": name,
+                        "parameters": arguments,
+                        "env_action": action,
+                        "observation": observation,
+                        "reward": float(result.get("reward", 0.0)),
+                        "done": bool(result.get("done", False)),
+                    }
+                )
+                return result
+
+            def stopped(result: dict, phase: str) -> str | None:
+                """环境提前结束时返回拒绝原因，否则 None。"""
+                if not result.get("done"):
+                    return None
+                reason = result.get("termination_reason") or (
+                    (result.get("reward_detail") or {}).get("termination_reason")
+                )
+                return f"terminated_{phase}:{reason}"
+
+            try:
+                with ShopAgentEnv(base_url=base_url) as env:
+                    env.include_trace_target = True
+                    initial = env.reset(task_id)
+                    instruction = str(initial.get("instruction") or "")
+                    goal_options = [str(v) for v in initial.get("goal_options") or []]
+
+                    result = run(env, "search_products", {"query": target["query"]})
+                    observation = executed[-1]["observation"]
+                    if page_contains(observation, gold):
+                        failure = "gold_already_on_page_1"
+                    else:
+                        failure = stopped(result, "search")
+
+                    pages = 1
+                    while failure is None and not page_contains(observation, gold):
+                        if pages >= max_pages:
+                            failure = "gold_not_found_within_max_pages"
+                            break
+                        if not can_page_forward(observation, clickable_buttons):
+                            failure = "no_more_pages"
+                            break
+                        result = run(env, "next_page", {})
+                        observation = executed[-1]["observation"]
+                        pages += 1
+                        failure = stopped(result, "paging")
+                        if failure is None and not page_asins(observation):
+                            failure = "no_more_pages"
+
+                    if failure is None:
+                        result = run(env, "open_product", {"asin": gold})
+                        observation = executed[-1]["observation"]
+                        failure = stopped(result, "open")
+                        options = available_options(observation) if failure is None else {}
+                        if failure is None and not options:
+                            failure = "detail_page_without_options"
+                        for required in goal_options:
+                            if failure is not None:
+                                break
+                            actual = match_option(
+                                required, options, clickable=set(clickable_buttons(observation))
+                            )
+                            if actual is None:
+                                failure = f"required_option_missing:{required}"
+                                break
+                            result = run(env, "select_option", {"value": actual})
+                            failure = stopped(result, "select")
+
+                    if failure is None:
+                        terminal = run(env, "buy_now", {})
+                        detail = terminal.get("reward_detail") or {}
+                        if detail.get("reward_type") != "gold_purchase":
+                            failure = f"not_gold:{detail.get('reward_type')}"
+            except Exception as exc:  # noqa: BLE001 - 单题异常不该带崩整批
+                failure = f"exception:{type(exc).__name__}:{exc}"
+
+            if failure is not None:
+                code = failure.split(":")[0]
+                rejections.append(
+                    {"task_id": task_id, "code": code, "reason": failure, "steps": len(executed)}
+                )
+                counts[code] += 1
+                emit(reject_handle, rejections[-1])
+                print(f"  [skip {position}/{len(targets)}] task {task_id} {failure}")
+                continue
+
+            trajectory = build_trajectory(
+                trajectory_id=f"m10paging-{task_id}-0",
+                task_id=task_id,
+                instruction=instruction,
+                system_prompt=SYSTEM_PROMPT,
+                executed=executed,
+                terminal=terminal,
             )
-            return result
+            emit(raw_handle, trajectory)
+            ok, reasons = acceptance_reasons(trajectory)
+            if not ok:
+                code = "acceptance"
+                rejections.append(
+                    {
+                        "task_id": task_id,
+                        "code": code,
+                        "reason": "acceptance:" + ",".join(reasons),
+                        "steps": len(executed),
+                    }
+                )
+                counts[code] += 1
+                emit(reject_handle, rejections[-1])
+                print(f"  [skip {position}/{len(targets)}] task {task_id} acceptance:{reasons}")
+                continue
+            emit(kept_handle, build_sft_row(trajectory))
+            turns = len([item for item in executed if item["tool_name"] == "next_page"])
+            print(
+                f"  [ok {position}/{len(targets)}] task {task_id} 名次 {target['rank']}"
+                f" → 翻 {turns} 页，{len(executed)} 步"
+            )
+    finally:
+        raw_handle.close()
+        kept_handle.close()
+        reject_handle.close()
 
-        with ShopAgentEnv(base_url=base_url) as env:
-            env.include_trace_target = True
-            initial = env.reset(task_id)
-            instruction = str(initial.get("instruction") or "")
-            goal_options = [str(v) for v in initial.get("goal_options") or []]
-
-            result = run(env, "search_products", {"query": target["query"]})
-            observation = executed[-1]["observation"]
-            if page_contains(observation, gold):
-                failure = "gold_already_on_page_1"
-            pages = 1
-            while failure is None and not page_contains(observation, gold):
-                if pages >= max_pages:
-                    failure = "gold_not_found_within_max_pages"
-                    break
-                result = run(env, "next_page", {})
-                observation = executed[-1]["observation"]
-                pages += 1
-                if not page_asins(observation):
-                    failure = "no_more_pages"
-                    break
-
-            if failure is None:
-                result = run(env, "open_product", {"asin": gold})
-                observation = executed[-1]["observation"]
-                options = available_options(observation)
-                if not options:
-                    failure = "detail_page_without_options"
-                for required in goal_options:
-                    if failure is not None:
-                        break
-                    actual = match_option(
-                        required, options, clickable=set(clickable_buttons(observation))
-                    )
-                    if actual is None:
-                        failure = f"required_option_missing:{required}"
-                        break
-                    result = run(env, "select_option", {"value": actual})
-
-            if failure is None:
-                terminal = run(env, "buy_now", {})
-                detail = terminal.get("reward_detail") or {}
-                if detail.get("reward_type") != "gold_purchase":
-                    failure = f"not_gold:{detail.get('reward_type')}"
-
-        if failure is not None:
-            rejections.append({"task_id": task_id, "reason": failure})
-            continue
-
-        trajectory = build_trajectory(
-            trajectory_id=f"m10paging-{task_id}-0",
-            task_id=task_id,
-            instruction=instruction,
-            system_prompt=SYSTEM_PROMPT,
-            executed=executed,
-            terminal=terminal,
-        )
-        ok, reasons = acceptance_reasons(trajectory)
-        raw_rows.append(trajectory)
-        if not ok:
-            rejections.append({"task_id": task_id, "reason": "acceptance:" + ",".join(reasons)})
-            continue
-        kept_rows.append(build_sft_row(trajectory))
-        print(
-            f"  [ok] task {task_id} 名次 {target['rank']} → 翻 {len([e for e in executed if e['tool_name']=='next_page'])} 页"
-            f"，{len(executed)} 步"
-        )
-
-    write_jsonl(raw_path, raw_rows)
-    write_jsonl(kept_path, kept_rows)
     summary = {
         "targets": len(targets),
-        "raw": len(raw_rows),
-        "kept": len(kept_rows),
+        "skipped_already_done": len(done_ids),
+        "raw": count_lines(raw_path),
+        "kept": count_lines(kept_path),
         "rejected": len(rejections),
-        "reject_reasons": dict(collections.Counter(r["reason"].split(":")[0] for r in rejections)),
+        "reject_reasons": dict(counts.most_common()),
         "raw_path": str(raw_path),
         "kept_path": str(kept_path),
+        "rejections_path": str(reject_path),
     }
     (out_dir / "summary.json").write_text(
         json.dumps({**summary, "rejections": rejections}, ensure_ascii=False, indent=2) + "\n",
@@ -442,6 +535,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-pages", type=int, default=MAX_PAGES)
     parser.add_argument("--min-rank", type=int, default=MIN_RANK)
     parser.add_argument("--max-rank", type=int, default=MAX_RANK)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="generate: 跳过输出目录里已完成的 task_id，接着跑",
+    )
     args = parser.parse_args(argv)
 
     if args.mode == "plan":
@@ -473,7 +571,11 @@ def main(argv: list[str] | None = None) -> int:
             f"但 --max-pages={args.max_pages}；要么加 --max-pages，要么重跑 plan 收窄 --max-rank"
         )
     summary = generate(
-        targets, base_url=args.base_url, out_dir=args.out_dir, max_pages=args.max_pages
+        targets,
+        base_url=args.base_url,
+        out_dir=args.out_dir,
+        max_pages=args.max_pages,
+        resume=args.resume,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

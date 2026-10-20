@@ -288,5 +288,143 @@ class ContractTest(unittest.TestCase):
         self.assertIn("reward_v3_not_gold_purchase", reasons)
 
 
+class FakeEnv:
+    """按脚本回放的最小环境。记录收到的动作，用于断言「没发不该发的动作」。"""
+
+    def __init__(self, script: dict[int, list], **kwargs) -> None:
+        self.script = script
+        self.include_trace_target = False
+        self.actions: list[str] = []
+        self.task_id = -1
+        self.cursor = 0
+        self.kwargs = kwargs
+
+    def __enter__(self) -> "FakeEnv":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def reset(self, task_id: int) -> dict:
+        self.task_id = int(task_id)
+        self.cursor = 0
+        return {"instruction": "Instruction: 测试题", "goal_options": []}
+
+    def step(self, action: str) -> dict:
+        self.actions.append(action)
+        responses = self.script[self.task_id]
+        if self.cursor >= len(responses):
+            raise AssertionError(f"task {self.task_id} 收到了多余的动作：{action}")
+        response = responses[self.cursor]
+        self.cursor += 1
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def page(rows: list[tuple[int, str]], *, next_button: bool = True, number: int = 1) -> str:
+    text = search_page(rows, page=number)
+    if not next_button:
+        text = text.replace('["Next >", "< Prev", "Back to Search"]', '["< Prev", "Back to Search"]')
+    return text
+
+
+def terminated(reason: str) -> dict:
+    return {"done": True, "termination_reason": reason, "reward_detail": {"termination_reason": reason}}
+
+
+class GenerateLoopTest(unittest.TestCase):
+    """跑批不能因为单题异常或环境提前结束就整批崩掉 —— 这是实际踩过的坑。"""
+
+    def run_generate(self, script: dict[int, list], targets: list[dict], **kwargs) -> tuple[dict, FakeEnv]:
+        import tempfile
+        from pathlib import Path
+
+        import shopping_grpo.environment.client as client_module
+
+        captured: dict = {}
+
+        def factory(**init_kwargs):
+            env = FakeEnv(script, **init_kwargs)
+            captured["env"] = env
+            return env
+
+        original = client_module.ShopAgentEnv
+        client_module.ShopAgentEnv = factory
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                summary = module.generate(
+                    targets, base_url="http://fake", out_dir=Path(tmp), max_pages=6, **kwargs
+                )
+                captured["kept"] = (Path(tmp) / "kept.jsonl").read_text(encoding="utf-8")
+                captured["raw"] = (Path(tmp) / "raw.jsonl").read_text(encoding="utf-8")
+                captured["rejects"] = (Path(tmp) / "rejections.jsonl").read_text(encoding="utf-8")
+        finally:
+            client_module.ShopAgentEnv = original
+        return summary, captured
+
+    def target(self, task_id: int, asin: str = GOLD, rank: int = 37) -> dict:
+        return {"task_id": task_id, "asin": asin, "query": "q", "rank": rank, "pages": 2}
+
+    def success_script(self) -> list[dict]:
+        options = {"颜色分类": [OPTION_PLAIN]}
+        return [
+            {"observation": page([(1, OTHER)])},
+            {"observation": page([(21, THIRD), (37, GOLD)], number=2)},
+            {"observation": detail_page(options)},
+            {
+                "done": True,
+                "over": True,
+                "termination_reason": "gold_purchase",
+                "reward_detail": {
+                    "reward_version": "shopsimulator-reward-v4",
+                    "reward_type": "gold_purchase",
+                    "reward_valid": True,
+                    "purchase_success": True,
+                    "termination_reason": "gold_purchase",
+                },
+                "purchase": {"asin": GOLD},
+                "goal": {"asin": GOLD},
+            },
+        ]
+
+    def test_success_path_writes_kept_row(self) -> None:
+        summary, captured = self.run_generate({7: self.success_script()}, [self.target(7)])
+        self.assertEqual(summary["kept"], 1)
+        self.assertEqual(summary["rejected"], 0)
+        self.assertEqual(len(captured["kept"].splitlines()), 1)
+
+    def test_environment_terminating_mid_paging_does_not_crash(self) -> None:
+        """翻页时环境提前结束：要记成拒绝原因，不能继续发 next_page。"""
+        script = [
+            {"observation": page([(1, OTHER)])},
+            {"observation": page([(21, THIRD)], number=2), **terminated("no_more_results")},
+        ]
+        summary, captured = self.run_generate({7: script}, [self.target(7)])
+        self.assertEqual(summary["kept"], 0)
+        self.assertEqual(summary["reject_reasons"], {"terminated_paging": 1})
+        self.assertIn("terminated_paging:no_more_results", captured["rejects"])
+
+    def test_no_next_button_means_no_click(self) -> None:
+        script = [{"observation": page([(1, OTHER)], next_button=False)}]
+        summary, captured = self.run_generate({7: script}, [self.target(7)])
+        self.assertEqual(summary["reject_reasons"], {"no_more_pages": 1})
+        self.assertEqual(len(captured["env"].actions), 1, "只该发一次搜索，不该点下一页")
+
+    def test_one_bad_task_does_not_stop_the_batch(self) -> None:
+        script = {
+            7: [RuntimeError("连接断了")],
+            8: self.success_script(),
+        }
+        summary, _ = self.run_generate(script, [self.target(7), self.target(8)])
+        self.assertEqual(summary["kept"], 1)
+        self.assertEqual(summary["reject_reasons"], {"exception": 1})
+
+    def test_gold_on_first_page_is_rejected(self) -> None:
+        script = [{"observation": page([(1, GOLD)])}]
+        summary, _ = self.run_generate({7: script}, [self.target(7)])
+        self.assertEqual(summary["reject_reasons"], {"gold_already_on_page_1": 1})
+
+
 if __name__ == "__main__":
     unittest.main()
