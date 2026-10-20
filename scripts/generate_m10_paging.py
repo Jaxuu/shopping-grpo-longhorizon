@@ -53,7 +53,9 @@ DEFAULT_INDEX = ROOT / ".workbuddy-ai/cache/products_local.sqlite3"
 DEFAULT_TARGETS = ROOT / "data/collection/m10_paging_targets.jsonl"
 DEFAULT_OUT = ROOT / "outputs/m10-paging"
 
-SEARCH_ROW = re.compile(r"^(?P<rank>\d+)\|(?P<asin>[^|\n]+)\|", re.MULTILINE)
+#: 与 `environment.actions.product_ids` 逐字同源（`^\d+\|(\d{8,12})\|`）。
+#: 这里若放宽，就会出现「脚本以为看见了 gold、点击闸门却判它不可点」的分歧。
+SEARCH_ROW = re.compile(r"^(?P<rank>\d+)\|(?P<asin>\d{8,12})\|", re.MULTILINE)
 AVAILABLE_OPTIONS = re.compile(r"^available_options: (?P<payload>.+)$", re.MULTILINE)
 PAGE_MARKER = "page_type: search_results"
 

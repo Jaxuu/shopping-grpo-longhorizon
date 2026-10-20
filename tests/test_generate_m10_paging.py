@@ -104,6 +104,16 @@ class PageTest(unittest.TestCase):
         self.assertTrue(module.page_contains(page, GOLD))
         self.assertFalse(module.page_contains(page, THIRD))
 
+    def test_non_numeric_row_is_not_clickable(self) -> None:
+        """行内 ASIN 不是 8–12 位数字时，点击闸门会拒；脚本也不能当它「看见了」。"""
+        page = search_page([(25, GOLD)]).replace(GOLD, "B0GOLDASIN")
+        self.assertEqual(module.page_asins(page), [])
+        self.assertFalse(module.page_contains(page, "B0GOLDASIN"))
+
+    def test_page_marker_alone_is_not_enough(self) -> None:
+        page = "[SHOPPING_OBSERVATION_V2]\npage_type: search_results\n没有结果行"
+        self.assertEqual(module.page_asins(page), [])
+
 
 class MatchOptionTest(unittest.TestCase):
     options = {"颜色分类": ["a559", OPTION_PLAIN, "1 | 2中阮"]}
