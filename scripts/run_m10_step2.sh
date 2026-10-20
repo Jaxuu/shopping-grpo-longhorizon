@@ -7,6 +7,7 @@
 #
 # 用法：
 #   bash scripts/run_m10_step2.sh            # 全流程：健康检查 → 采集 → 判定
+#   bash scripts/run_m10_step2.sh smoke      # 先用 1 道题端到端试跑（约 1–2 分钟）
 #   bash scripts/run_m10_step2.sh analyze    # 只判定（已有 raw.jsonl）
 #   bash scripts/run_m10_step2.sh collect    # 只采集
 #   bash scripts/run_m10_step2.sh binding    # 复核选题是否真的逼出了动作（纯 CPU，不调 API）
@@ -53,6 +54,28 @@ EOF
   echo "[ok] 老师模型：${MODEL} @ ${OPENAI_BASE_URL}"
 }
 
+smoke() {
+  check_environment
+  check_teacher
+  local tmp="/tmp/m10-step2-smoke"
+  mkdir -p "${tmp}"
+  rm -f "${tmp}/raw.jsonl"   # 只删这一个文件，保证每次都是真跑一遍
+  echo "[smoke] 用 1 道题端到端试跑（约 1–2 分钟），产物写到 ${tmp}"
+  "${PY}" scripts/collect_sft_data.py \
+    --tasks "${TARGETS}" \
+    --output-dir "${tmp}" \
+    --model "${MODEL}" \
+    --base-url "${ENV_URL}" \
+    --attempts-per-task 1 \
+    --limit 1 \
+    --workers 1 \
+    --temperature 0.0 \
+    --max-steps 35
+  echo "[smoke] 通过：raw 里有 $(wc -l < "${tmp}/raw.jsonl") 条轨迹，可以跑全量了。"
+  echo "[smoke] 看一眼它做了什么（可选）："
+  echo "  ${PY} scripts/analyze_m10_step2_verification.py ${tmp}/raw.jsonl --detail"
+}
+
 collect() {
   check_environment
   check_teacher
@@ -84,6 +107,7 @@ analyze() {
 
 case "${MODE}" in
   all)     collect; echo; analyze ;;
+  smoke)   smoke ;;
   collect) collect ;;
   analyze) analyze ;;
   binding)
@@ -98,5 +122,5 @@ case "${MODE}" in
       --targets "${TARGETS}" \
       --detail
     ;;
-  *) echo "用法: $0 [all|collect|analyze|binding]" >&2; exit 2 ;;
+  *) echo "用法: $0 [all|smoke|collect|analyze|binding]" >&2; exit 2 ;;
 esac
