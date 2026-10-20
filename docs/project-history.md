@@ -2,15 +2,16 @@
 
 > 用途：这是**可入库、可长期保存**的项目主记录，供写项目介绍、复盘与归档引用。
 > 它只收录结论与证据指针，细节留在各阶段的专门文档里（见 §1 记录地图）。
-> 最后更新：2026-10-18（M7 / Reward v5 落地后）。
+> 最后更新：2026-10-20（M10 立项，主线回到 SFT）。
 
 ---
 
 ## 0. 一句话历程
 
 **Baseline 0.0% → SFT 62.0%（+62pp）→ GRPO 三次尝试均无显著增益（作者 +1.5pp，p≈0.664；
-我们两轮 0 / 负），瓶颈最终定性为「奖励信号吞吐」而非超参，处置落在 Reward v5 的
-`wrong_purchase` 档位 shaping 上。**
+我们两轮 0 / 负）。瓶颈已重新定性：不是奖励信号吞吐，也不是 2B 能力上限，而是
+「SFT 数据的行为覆盖太窄」——89.2% 的示范是「搜 1 次 → 开第 1 个 → 买」，
+学生忠实地复制了它 ⇒ 主线回到 SFT 数据重构（M10）。**
 
 ---
 
@@ -19,11 +20,14 @@
 | 层 | 位置 | 内容 | 是否入库 |
 |---|---|---|---|
 | **主记录** | `docs/project-history.md`（本文件） | 时间线、问题台账、负结果、判据体系 | ✅ |
+| **经验台账** | `docs/lessons-learned.md` | **已关闭的路、六条判读铁律、硬约束、工程坑**。改计划前必读 | ✅ |
+| 能力审计 | `docs/capability-coverage-audit.md` | 能力—数据—结果三方对照（评测考什么 / 数据教没教 / 结果差在哪） | ✅ |
 | 阶段文档 | `docs/reward-v3.md` / `reward-v4.md` / `reward-v5.md` | 奖励口径的逐版规格与变更理由 | ✅ |
 | 阶段文档 | `docs/data-collection.md` / `sft.md` / `grpo.md` / `evaluation*.md` | 各阶段的流程与协议 | ✅ |
 | 实验产物 | `experiments/{baseline,sft,sft-m5,grpo}/`、`comparison.md` | 配置 + 摘要 + 对照表（小体积） | ✅ |
 | 审计产物 | `audit/*.jsonl|json`、`audit/reward-v4-hashes.txt`、`reward-v5-hashes.txt` | 准入判定、冻结哈希（机器可读） | ✅ |
-| **工作记录** | `plans/`（19 份） | 逐阶段 runbook、证据计划、决策、交接 | ❌ gitignored |
+| **执行计划** | `plans/roadmap-v2.md` | **当前唯一有效计划**（M10：回到 SFT 补三种场景示范） | ❌ gitignored |
+| **工作记录** | `plans/`（其余 20 份） | 逐阶段 runbook、证据计划、决策、交接。**均已降级为历史证据** | ❌ gitignored |
 | 会话记忆 | `.workbuddy-ai/memory/` | 每日工作日志 + 长期约定 | ❌ gitignored |
 
 ⚠️ **归档风险（已识别）**：`plans/` 与 `.workbuddy-ai/` 不进 git，只存在于本地/服务器
@@ -43,7 +47,10 @@
 | **M5** SFT 消融 | 两种 loss scope 重训（A=assistant / B=tool-call-only） | **M5-B 62.0%** 全指标最优 ⇒ 选为 GRPO 起点 | `experiments/sft-m5/` |
 | **M6** GRPO 第一轮 | 按作者配方（lr 5e-6、batch 4、n 4、clip .28、50 步） | **62.0%**，与 M5-B 打平（123/124 题相同）⇒ 零结果 | `plans/m6-grpo-runbook.md` |
 | **M6-R** GRPO 第二轮 | 唯一变量 lr 5e-6→2e-5 | val@25 **0.3425** < 起点 0.3599；step 48 熔断 ⇒ 负结果，不采纳 | `outputs/archive/m6r-crash48/` |
-| **M7** Reward v5 | `wrong_purchase` 由常数 −0.85 改为 band `[−0.85, −0.66]` | 已实现、待过三个 Gate 后开跑 | `docs/reward-v5.md` |
+| **M7** Reward v5 | `wrong_purchase` 由常数 −0.85 改为 band `[−0.85, −0.66]` | **Gate 3 fail（梯度份额 0.3%/0.1%/0.1% vs 门槛 5%），未开训 ⇒ 关闭**；L2 判定不变性重放通过 | `docs/reward-v5.md`、`plans/m7-closing.md` |
+| **M8** 多候选核验 | 计划补 100 条「多开商品」gold 轨迹 | **靶点被离线解剖否决，未开训**；转为 3 个纯 CPU 诊断脚本 | `plans/m8-data-plan.md` |
+| **M9** 推理期强制探索 | 加守卫「买前必须开 k 个候选」，其余全不动 | k=5 作废（需 42 步 > 冻结 35）；k=3 同批 9 题 **7/9 → 0/9**（p≈0.016）⇒ **方向否决** | `plans/m9-exploration-probe.md` |
+| **M10** 数据重构（**当前**） | **回到 SFT**：补「翻页 / 候选筛选后回头买 / 超预算排除」三种场景的正确示范 | **进行中**，6 Phase + 5 闸门 | `plans/roadmap-v2.md` |
 
 ### 2.1 各阶段评测成绩（Final-200 Clean，每题 1 次确定性 rollout）
 
@@ -456,8 +463,14 @@ search_products → open_product → select_option → view_features → prev_pa
   起被复用为「**Reward v5 的 GRPO 臂**」的代号。引用时请注明是哪个含义。
 - **M5-A / M5-B**：两种 SFT loss scope（assistant / tool-call-only），B 为 GRPO 起点。
 - **M8**：曾计划「补采 100 条多开商品核验轨迹 → 混训 SFT」，**靶点被 §5.1 的离线解剖否决**
-  （规格只占失败 24%），从未产生训练产物。该代号目前是空的，不要与「M8 诊断脚本」混淆。
-  §5.1 的结论已改写 M8 的靶点：从「规格核验」改为「多候选比较」。
+  （规格只占失败 24%），从未产生训练产物。**该代号已关闭**；"M8 诊断脚本"
+  （`analyze_zero_variance_behaviour` / `analyze_selection_vs_retrieval` / `select_m8_collection_targets`）
+  是它留下的资产，可继续复用。
+- **M9**：推理期强制探索探针（买前必须打开 k 个候选），两轮皆负，**已关闭**。
+  它证明的是「推理期外挂规则无效」，不等于「训练也学不会」。
+- **M10**：**当前主线**。回到 SFT，按「行为形态」重构训练数据（翻页 / 候选筛选后回头买 /
+  超预算排除），重训 SFT 后重评。执行计划见 `plans/roadmap-v2.md`；
+  已关闭的路与判读铁律见 `docs/lessons-learned.md`。
 - **Gate 1/2/3**：开跑前的三道准入检查（指标键 / 组内方差 / 梯度份额）。
 
 ---
