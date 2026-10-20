@@ -6,6 +6,11 @@
 #   2. label   —— 给新题补离线难度标签（课程清单要用）
 #   3. manifest—— 生成课程清单（含与评测集的零重叠校验）
 #
+# 增量来源有两批，存在哪批并哪批：
+#   outputs/m10-rank2/kept.jsonl   采集筛出的「gold 名次≥2」
+#   outputs/m10-paging/kept.jsonl  脚本合成的「翻页才找到」（A 桶）
+# 可用 RANK2_INCREMENT / PAGING_INCREMENT 覆盖。
+#
 # 用法：
 #   bash scripts/run_m10r_build.sh                  # 默认不降采样（第 1 名占 52%）
 #   bash scripts/run_m10r_build.sh --target-share 0.60   # 强干预臂
@@ -22,16 +27,36 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
 PY="${PY:-${ROOT}/.venv/bin/python}"
-INCREMENT="${INCREMENT:-outputs/m10-rank2/kept.jsonl}"
+# 增量来源可以有多批：rank≥2 的采集增量 + 脚本合成的翻页增量。
+# 缺哪批就跳过哪批（会打印实际用到的来源），但至少要有一批。
+INCREMENT_SOURCES=(
+  "${RANK2_INCREMENT:-outputs/m10-rank2/kept.jsonl}"
+  "${PAGING_INCREMENT:-outputs/m10-paging/kept.jsonl}"
+)
 OUT_DIR="${OUT_DIR:-data/sft_m10r}"
 POOL="${POOL:-data/sft_pure_v4/all.jsonl}"
 LABELS="${LABELS:-data/sft_pure_v4/difficulty_labels.jsonl}"
 EVALUATION="${EVALUATION:-data/evaluation/tasks.jsonl}"
 
-if [[ ! -f "${INCREMENT}" ]]; then
-  echo "没有增量文件 ${INCREMENT}；先跑 bash scripts/run_m10_rank2.sh collect/filter。" >&2
+mkdir -p "${OUT_DIR}"
+STAGED="${OUT_DIR}/increment_merged.jsonl"
+: > "${STAGED}"
+USED=()
+for source in "${INCREMENT_SOURCES[@]}"; do
+  if [[ ! -f "${source}" ]]; then
+    echo "跳过（不存在）：${source}" >&2
+    continue
+  fi
+  count=$(wc -l < "${source}")
+  echo "并入：${source}（${count} 行）"
+  cat "${source}" >> "${STAGED}"
+  USED+=("${source}")
+done
+if [[ ${#USED[@]} -eq 0 ]]; then
+  echo "没有任何增量来源存在；先跑 run_m10_rank2.sh filter 或 generate_m10_paging.py。" >&2
   exit 1
 fi
+INCREMENT="${STAGED}"
 
 # 只透传配比旋钮；--dry-run 是本脚本自己的开关
 BUILD_ARGS=()
@@ -44,7 +69,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "[1/3] 合并与配比"
+echo "[1/3] 合并与配比（增量 ${#USED[@]} 批，共 $(wc -l < "${STAGED}") 行）"
 "${PY}" scripts/build_m10r_pool.py \
   --pool "${POOL}" \
   --increment "${INCREMENT}" \
