@@ -18,8 +18,10 @@ Step 2 实测：老师**自己从不翻页**（6 题 gold 在 21–99 名、翻�
 
 两步走
 ------
-1. ``--mode plan``（纯 CPU，不连环境）：在全语料里找 gold 名次 **21–120** 的题，
+1. ``--mode plan``（纯 CPU，不连环境）：在全语料里找 gold 名次 **21–60** 的题，
    记下把 gold 排到该名次的那个查询词，写 ``data/collection/m10_paging_targets.jsonl``。
+   （上限 60 不是随便定的：环境的循环检测器在第 3 次 ``next_page`` 就判
+   ``repeat_loop`` 终止，名次 61 以后**物理上到不了**。）
 2. ``--mode generate``（需要环境服务）：对每道题执行
    ``search → next_page×k → open → select_option×m → buy_now``，
    逐步校验观测里真的出现了 gold，最后校验终局是 `gold_purchase`。
@@ -60,11 +62,13 @@ SEARCH_ROW = re.compile(r"^(?P<rank>\d+)\|(?P<asin>\d{8,12})\|", re.MULTILINE)
 AVAILABLE_OPTIONS = re.compile(r"^available_options: (?P<payload>.+)$", re.MULTILINE)
 PAGE_MARKER = "page_type: search_results"
 
-#: 第一页只渲染前 20 名。评测 A 桶那 18 道可达题里 gold 最远在第 114 名，
-#: 所以上限要盖到 120（= 6 页），否则示范只教到「翻两页」，深题照样放弃。
+#: 第一页只渲染前 20 名。**环境的循环检测器把翻页卡在 2 次**（共 3 页）：
+#: 实测 199 道题里，名次 61–116 的 41 道全部在**第 3 次**点 `next_page` 时被
+#: 判成 `repeat_loop` 终止，而名次 21–60 的题无一失败。所以能翻到的上限是
+#: 第 60 名，不是召回深度 150。
 MIN_RANK = 21
-MAX_RANK = 120
-MAX_PAGES = 6
+MAX_RANK = 60
+MAX_PAGES = 3
 
 
 def pages_needed(rank: int, *, page_size: int = 20) -> int:

@@ -132,6 +132,7 @@
 | `SYSTEM_PROMPT` | `evaluation/rollout.py` | SFT 轨迹带着它采的，改了 Final-200 不可比 |
 | 工具集 | `environment/tools.py` | `next_page` / `back_to_search` / `finish_without_purchase` 全都在，不缺工具，缺示范 |
 | 观测只渲染前 20 名 | `--observation-search-top-k` 默认 20 | **不要调大**——那等于替模型翻页，会污染评测口径 |
+| **翻页最多 2 次** | 环境循环检测器 | 第 3 次 `next_page` 判 `repeat_loop` 终止。实测 199 道题：名次 61–116 的 41 道全部在此终止，名次 21–60 无一失败 ⇒ **gold 排 61 名以后物理上到不了**，训练再多也救不回来。别再把翻页目标名次设到 60 以后 |
 | 终局奖励离散查表 | `shopsimulator-reward-v4` | gold 1.0 / valid_alt 0.55 / partial ≤0.25 / repeat_loop −0.65 / wrong −0.85…−0.66。**改表 = 目标函数变 = 历史全部作废** |
 | 评测集 200 题 | `data/evaluation/tasks.jsonl` | 冻结。它是考卷，不是训练素材 |
 | 四池两两零重叠 | Eval / SFT / GRPO train / val | 破了就无法归因 |

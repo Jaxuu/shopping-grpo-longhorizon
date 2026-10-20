@@ -70,8 +70,8 @@ class PagingBandTest(unittest.TestCase):
 
     def test_band_edges(self) -> None:
         self.assertTrue(module.in_paging_band(21))
-        self.assertTrue(module.in_paging_band(120))
-        self.assertFalse(module.in_paging_band(121))
+        self.assertTrue(module.in_paging_band(60))
+        self.assertFalse(module.in_paging_band(61))
 
     def test_band_is_overridable(self) -> None:
         self.assertTrue(module.in_paging_band(60, min_rank=21, max_rank=60))
@@ -80,10 +80,15 @@ class PagingBandTest(unittest.TestCase):
     def test_none_is_not_paging(self) -> None:
         self.assertFalse(module.in_paging_band(None))
 
-    def test_deepest_eval_bucket_rank_is_reachable(self) -> None:
-        """评测 A 桶最远 gold 在第 114 名 —— 默认上限必须盖得住。"""
-        self.assertTrue(module.in_paging_band(114))
-        self.assertLessEqual(module.pages_needed(114), module.MAX_PAGES)
+    def test_environment_loop_guard_caps_reachable_rank(self) -> None:
+        """环境的循环检测器在第 3 次 next_page 判 repeat_loop 终止。
+
+        实测 199 道题：名次 61–116 的 41 道全部在第 4 个动作（第 3 次翻页）被终止，
+        名次 21–60 的题无一失败 ⇒ 能翻到的上限就是第 60 名。
+        """
+        self.assertEqual(module.MAX_RANK, 60)
+        self.assertEqual(module.pages_needed(module.MAX_RANK), module.MAX_PAGES)
+        self.assertFalse(module.in_paging_band(61))
 
 
 class PagesNeededTest(unittest.TestCase):
