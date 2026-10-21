@@ -255,25 +255,25 @@ class RenderTest(unittest.TestCase):
     def test_projected_harvest_scales_with_candidates(self):
         records = [self._record(used_next_page=True, bought_gold=True, accepted=True)]
         summary = module.summarize_scenario(records, "used_next_page")
-        summary["planned_attempts"] = 4
-        # paging 全量 158 题 × 4 次 × 100% 可收
-        self.assertEqual(module.projected_harvest("paging", summary), 158 * 4)
+        # paging 全量 158 题 × 题级可收率 100%
+        self.assertEqual(module.projected_harvest("paging", summary), 158)
 
-    def test_projection_uses_planned_attempts_not_mean(self):
-        """采集中断时均值会偏小，外推必须用计划次数（最大 attempt_index+1）。
+    def test_projection_counts_tasks_not_attempts(self):
+        """池子每题只留一条，所以外推**不能**乘每题次数。
 
-        2026-10-21：339/480 的中断样本算出均值 3 次，实际计划 4 次，
-        用均值会把「全量能收多少条」低估 25%。
+        2026-10-21：旧公式 `harvest_rate × 题数 × 次数` 把外推放大 4 倍
+        （换词批报 160 条、对比批报 220 条）。同一题采 4 次也只进池子 1 条。
         """
         records = [
-            self._record(task_id=1, attempt_index=0, used_next_page=True),
-            self._record(task_id=1, attempt_index=3, used_next_page=True),
+            self._record(task_id=1, attempt_index=index, used_next_page=True,
+                         bought_gold=True, accepted=True)
+            for index in range(4)
         ]
         summary = module.summarize_scenario(records, "used_next_page")
         self.assertEqual(summary["planned_attempts"], 4)
-        self.assertAlmostEqual(summary["attempts_per_task"], 2.0)
-        summary["harvest_rate"] = 0.5
-        self.assertEqual(module.projected_harvest("paging", summary), round(0.5 * 158 * 4))
+        self.assertEqual(summary["harvest"], 4)          # 轨迹级
+        self.assertEqual(summary["task_harvest"], 1)     # 题级（能进池子的条数）
+        self.assertEqual(module.projected_harvest("paging", summary), 158)
 
     def test_conditional_rate_separates_capability_from_success(self):
         """买对的轨迹里有多少做了动作：把「不会做」和「做了但买不对」分开。"""

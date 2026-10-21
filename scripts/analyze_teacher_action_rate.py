@@ -22,8 +22,10 @@ M10 Step 2 的 90 题（每题 1 次、temperature 0.0）给出 6.7% / 6.7% / 3.
 * 可收率 < 20% ⇒ 采集补不进配比，才轮到脚本合成。
 
 阈值 20% 是预登记的（`plans/m10-dataset-design.md` 与 M10 Step 2 同一条规则），
-不随结果调整。理由：20% 的可收率，在 158 道题 × 4 次的采集量下约能收 120+ 条，
-够做示范；低于这个数补不进配比。
+不随结果调整。它判的是**轨迹级**可收率（能不能采到）；换算成「能收多少条」要用
+**题级**可收率（``task_harvest_rate``）——池子每题只留一条，所以条数 = 能被救回来的题数，
+不是轨迹数 × 次数。4 次采样下 20% 的轨迹级大约对应 1-(1-0.2)^4 ≈ 59% 的题级
+⇒ 160 题约 95 条，够做示范。
 
 三个场景 → 目标动作
 ------------------
@@ -219,6 +221,13 @@ def summarize_scenario(records: list[dict], action: str) -> dict:
     # 可收 = 做了目标动作 **且** 过验收（= 能进 SFT 池）。只做动作但没买对的会被筛掉。
     # ``accepted`` 缺失时按「不可收」处理——宁可少算，不可把进不了池子的算成可收。
     harvest = sum(1 for record in records if record[action] and record.get("accepted"))
+    # 题级可收 = 该题**至少有一条**合格轨迹。池子每题只留一条，所以「能收多少条」
+    # 等于「多少题被救回来」，与轨迹数无关（旧口径乘次数，放大 4 倍）。
+    task_harvest = sum(
+        1
+        for rows in per_task.values()
+        if any(row[action] and row.get("accepted") for row in rows)
+    )
     return {
         "tasks": task_total,
         "trajectories": trajectories,
@@ -235,6 +244,8 @@ def summarize_scenario(records: list[dict], action: str) -> dict:
         "hit_rate": rate(hits, trajectories),
         "harvest": harvest,
         "harvest_rate": rate(harvest, trajectories),
+        "task_harvest": task_harvest,
+        "task_harvest_rate": rate(task_harvest, task_total),
         # 条件率 = 买对的轨迹里做了目标动作的比例。
         # 它把「老师不会做」和「老师做了但没买对」分开：
         # 可收率被买对率压着时，只有条件率高才说明能力在、只是成功率低。
@@ -269,13 +280,20 @@ def verdict(hit_rate: float, *, threshold: float = PROBE_THRESHOLD) -> str:
 
 
 def projected_harvest(scenario: str, row: dict) -> int:
-    """把样本可收率外推到全量题数 × 每题次数，估「采集到底能收多少条」。"""
+    """把样本的**题级**可收率外推到全量题数，估「采集到底能收多少条」。
+
+    ⚠️ **不能乘每题次数**（2026-10-21 修正，用户追问「探针确定能采够吗」时发现）：
+    SFT 池是**每题只留一条**（``select_teacher_pattern_batch.pick_best``），
+    同一题采 4 次也只有 1 条能进池子。所以能收多少**条** = 有多少**题**能被救回来，
+    旧公式 ``harvest_rate × 题数 × 次数`` 把外推放大了 4 倍。
+
+    实测校验：翻页题 160 条轨迹按旧公式外推 ≈ 12 条，实际 ``paging_requery``
+    筛出 16 条（不同动作，同量级），说明题级口径才是对的量级。
+    """
     candidates = SCENARIO_CANDIDATES.get(scenario)
     if not candidates:
         return 0
-    # 用计划次数（最大 attempt_index+1），不用均值——中断时均值会偏小。
-    attempts = row.get("planned_attempts") or 0
-    return int(round(row["harvest_rate"] * candidates * attempts))
+    return int(round(row.get("task_harvest_rate", 0.0) * candidates))
 
 
 def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) -> str:
@@ -330,8 +348,10 @@ def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) ->
             f"- {SCENARIO_LABEL[scenario]}：可收率 {row['harvest_rate']:.1%}"
             f"（动作率 {row['hit_rate']:.1%}，买对时做了动作 {row['harvest_given_gold']:.1%}）→ "
             f"**{verdict(row['harvest_rate'], threshold=threshold)}**"
-            f"；按全量 {SCENARIO_CANDIDATES.get(scenario, 0)} 题 × "
-            f"{row['planned_attempts']} 次推算，约可收 **{projected} 条**"
+            f"；题级可收 {row['task_harvest']}/{row['tasks']}"
+            f"（{row['task_harvest_rate']:.0%}）⇒ 按全量 "
+            f"{SCENARIO_CANDIDATES.get(scenario, 0)} 题推算，约可收 "
+            f"**{projected} 条**（池子每题只留一条，不乘次数）"
         )
     return "\n".join(lines)
 
