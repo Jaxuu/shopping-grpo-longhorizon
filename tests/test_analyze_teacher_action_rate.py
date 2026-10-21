@@ -248,15 +248,44 @@ class RenderTest(unittest.TestCase):
         ]
         summaries = {"paging": module.summarize_scenario(records, "used_next_page")}
         text = module.render(summaries)
-        self.assertIn("可收率 0.0%（动作率 100.0%）", text)
+        self.assertIn("可收率 0.0%", text)
+        self.assertIn("动作率 100.0%", text)
         self.assertIn("采不到，才考虑合成", text)
 
     def test_projected_harvest_scales_with_candidates(self):
         records = [self._record(used_next_page=True, bought_gold=True, accepted=True)]
         summary = module.summarize_scenario(records, "used_next_page")
-        summary["attempts_per_task"] = 4.0
+        summary["planned_attempts"] = 4
         # paging 全量 158 题 × 4 次 × 100% 可收
         self.assertEqual(module.projected_harvest("paging", summary), 158 * 4)
+
+    def test_projection_uses_planned_attempts_not_mean(self):
+        """采集中断时均值会偏小，外推必须用计划次数（最大 attempt_index+1）。
+
+        2026-10-21：339/480 的中断样本算出均值 3 次，实际计划 4 次，
+        用均值会把「全量能收多少条」低估 25%。
+        """
+        records = [
+            self._record(task_id=1, attempt_index=0, used_next_page=True),
+            self._record(task_id=1, attempt_index=3, used_next_page=True),
+        ]
+        summary = module.summarize_scenario(records, "used_next_page")
+        self.assertEqual(summary["planned_attempts"], 4)
+        self.assertAlmostEqual(summary["attempts_per_task"], 2.0)
+        summary["harvest_rate"] = 0.5
+        self.assertEqual(module.projected_harvest("paging", summary), round(0.5 * 158 * 4))
+
+    def test_conditional_rate_separates_capability_from_success(self):
+        """买对的轨迹里有多少做了动作：把「不会做」和「做了但买不对」分开。"""
+        records = [
+            self._record(used_next_page=True, bought_gold=True, accepted=True),
+            self._record(used_next_page=False, bought_gold=True, accepted=True),
+            self._record(used_next_page=False, bought_gold=True, accepted=True),
+            self._record(used_next_page=False, bought_gold=False, accepted=False),
+        ]
+        summary = module.summarize_scenario(records, "used_next_page")
+        self.assertAlmostEqual(summary["harvest_given_gold"], 1 / 3)
+        self.assertAlmostEqual(summary["harvest_rate"], 0.25)
 
     def test_candidate_counts_match_target_files(self):
         """SCENARIO_CANDIDATES 必须和清单口径一致，否则「预计可收」是假的。"""
@@ -416,7 +445,7 @@ class CoverageTest(unittest.TestCase):
             "paging": {
                 "tasks": tasks,
                 "trajectories": tasks * 4,
-                "attempts_per_task": 4.0,
+                "planned_attempts": 4,
             }
         }
 

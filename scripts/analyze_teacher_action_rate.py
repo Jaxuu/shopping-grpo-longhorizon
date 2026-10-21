@@ -223,10 +223,22 @@ def summarize_scenario(records: list[dict], action: str) -> dict:
         "tasks": task_total,
         "trajectories": trajectories,
         "attempts_per_task": rate(trajectories, task_total),
+        # 计划次数 = 观测到的最大 attempt_index + 1。
+        # 不能拿 ``attempts_per_task``（均值）去外推：采集中断时均值会偏小
+        # （2026-10-21 那次 339/480，均值算出 3 次，实际计划 4 次），
+        # 会把「全量能收多少条」低估三成。
+        "planned_attempts": max(
+            (int(record.get("attempt_index") or 0) for record in records), default=-1
+        )
+        + 1,
         "hits": hits,
         "hit_rate": rate(hits, trajectories),
         "harvest": harvest,
         "harvest_rate": rate(harvest, trajectories),
+        # 条件率 = 买对的轨迹里做了目标动作的比例。
+        # 它把「老师不会做」和「老师做了但没买对」分开：
+        # 可收率被买对率压着时，只有条件率高才说明能力在、只是成功率低。
+        "harvest_given_gold": rate(harvest, gold),
         "action_only": hits - harvest,
         "task_hit": task_hit,
         "task_hit_rate": rate(task_hit, task_total),
@@ -261,14 +273,15 @@ def projected_harvest(scenario: str, row: dict) -> int:
     candidates = SCENARIO_CANDIDATES.get(scenario)
     if not candidates:
         return 0
-    attempts = row.get("attempts_per_task") or 0
+    # 用计划次数（最大 attempt_index+1），不用均值——中断时均值会偏小。
+    attempts = row.get("planned_attempts") or 0
     return int(round(row["harvest_rate"] * candidates * attempts))
 
 
 def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) -> str:
     lines = [
-        "| 场景 | 题数 | 轨迹数 | 做了目标动作 | 动作率 | **可收（动作+买对）** | **可收率** | 做了动作但没买对 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 场景 | 题数 | 轨迹数 | 做了目标动作 | 动作率 | **可收（动作+买对）** | **可收率** | 买对时做了动作 | 做了动作但没买对 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for scenario in ("paging", "requery", "compare"):
         if scenario not in summaries:
@@ -279,6 +292,7 @@ def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) ->
             f"| {row['tasks']} | {row['trajectories']} "
             f"| {row['hits']} | {row['hit_rate']:.1%} "
             f"| {row['harvest']} | {row['harvest_rate']:.1%} "
+            f"| {row['harvest_given_gold']:.1%} "
             f"| {row['action_only']} |"
         )
 
@@ -314,10 +328,10 @@ def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) ->
         projected = projected_harvest(scenario, row)
         lines.append(
             f"- {SCENARIO_LABEL[scenario]}：可收率 {row['harvest_rate']:.1%}"
-            f"（动作率 {row['hit_rate']:.1%}）→ "
+            f"（动作率 {row['hit_rate']:.1%}，买对时做了动作 {row['harvest_given_gold']:.1%}）→ "
             f"**{verdict(row['harvest_rate'], threshold=threshold)}**"
             f"；按全量 {SCENARIO_CANDIDATES.get(scenario, 0)} 题 × "
-            f"{row['attempts_per_task']:.0f} 次推算，约可收 **{projected} 条**"
+            f"{row['planned_attempts']} 次推算，约可收 **{projected} 条**"
         )
     return "\n".join(lines)
 
@@ -347,7 +361,7 @@ def render_coverage(summaries: dict[str, dict], scenarios: dict[int, str]) -> st
         want = expected.get(scenario, 0)
         lines.append(
             f"| {SCENARIO_LABEL[scenario]} | {row['tasks']} | {want} "
-            f"| {row['attempts_per_task']:.0f} | {row['trajectories']} |"
+            f"| {row['planned_attempts']} | {row['trajectories']} |"
         )
         if want and row["tasks"] < want:
             incomplete.append(f"{SCENARIO_LABEL[scenario]} {row['tasks']}/{want}")

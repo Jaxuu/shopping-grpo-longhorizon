@@ -158,16 +158,36 @@ def describe_row(row: dict) -> dict:
     bought = purchased_asin(messages)
     ranks = seen_ranks(messages)
     opened = opened_asins(messages)
+    queries = {
+        " ".join(str(arguments.get("query") or "").split()).casefold()
+        for name, arguments in calls
+        if name == "search_products" and str(arguments.get("query") or "").strip()
+    }
+    paging = any(name in PAGING_TOOLS for name, _ in calls)
+    distinct_opens = len(set(opened))
     return {
         "task_id": int(row["task_id"]),
         "bought": bought,
         "rank": ranks.get(bought) if bought else None,
-        "distinct_opens": len(set(opened)),
+        "distinct_opens": distinct_opens,
+        "distinct_queries": len(queries),
         "steps": len(calls),
         # A 桶（gold 在第 21 名以后）只能靠翻页救；池子里有多少条翻页示范必须单列，
         # 否则会被「名次≥2」这个大数字盖住，误以为已经覆盖。
-        "paging": any(name in PAGING_TOOLS for name, _ in calls),
+        "paging": paging,
+        # 探索行为：翻过页 / 换过查询词 / 开过 ≥2 个候选。
+        # 它和「名次」是两个维度：换词重搜的轨迹换完词 gold 常常就在第 1 名，
+        # 按名次看是「简单样本」，但它教的恰恰是「别信第一次搜索」。
+        "explored": bool(paging or distinct_opens >= 2 or len(queries) >= 2),
     }
+
+
+def is_plain_rank1(profile: dict) -> bool:
+    """「没探索、直接买第 1 名」——这才是要挡的样本。
+
+    旧口径用 ``rank < 2`` 一刀切，会把换词重搜的轨迹一起挡掉（它们的 min 名次是 1）。
+    """
+    return profile["rank"] == 1 and not profile["explored"]
 
 
 def rank_bucket(rank: int | None) -> str:
@@ -290,13 +310,25 @@ def main(argv: list[str] | None = None) -> int:
 
     profiles = [describe_row(row) for row in pool_rows]
     increment_profiles = [describe_row(row) for row in admitted]
-    if any(p["rank"] is not None and p["rank"] < 2 for p in increment_profiles):
-        bad = [p["task_id"] for p in increment_profiles if p["rank"] is not None and p["rank"] < 2]
-        raise SystemExit(f"增量里混进了第 1 名样本：{bad[:10]}")
+    # 挡「纯第 1 名直购」，不是挡所有名次 1。
+    # 2026-10-21 探针：老师遇到「第一页没有」时 90.9% 换词重搜，换完词 gold 常常就在
+    # 第 1 名（160 道换词题里 103 道的好查询把 gold 排在第 1）。这类轨迹**正是要教的**
+    # ——它演示的是「第一次搜的结果不对就重搜」，不是「开第一个」。按旧口径（min 名次
+    # < 2 就拒）整批增量会被打回，所以改成看**有没有探索行为**。
+    plain_rank1 = [p for p in increment_profiles if is_plain_rank1(p)]
+    if plain_rank1:
+        raise SystemExit(
+            f"增量里混进了「没有探索行为、直接买第 1 名」的样本：{[p['task_id'] for p in plain_rank1][:10]}"
+        )
 
     rank_ge2_base = sum(1 for p in profiles if p["rank"] is not None and p["rank"] >= 2)
     rank1_base = sum(1 for p in profiles if is_rank1(p))
-    mix = plan_mix(rank_ge2_base + len(increment_profiles), rank1_base, args.target_share)
+    # 增量的「名次≥2」要按它自己的画像数，不能拿 len(increment_profiles) 充数：
+    # 换词重搜的轨迹 min 名次常是 1，把它算成 rank≥2 会让配比报告虚高。
+    rank_ge2_increment = sum(
+        1 for p in increment_profiles if p["rank"] is not None and p["rank"] >= 2
+    )
+    mix = plan_mix(rank_ge2_base + rank_ge2_increment, rank1_base, args.target_share)
 
     dropped = downsample_rank1(profiles, mix["rank1_kept"], args.seed)
     kept_pool = [row for index, row in enumerate(pool_rows) if index not in dropped]
@@ -346,6 +378,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "paging_rows": sum(1 for p in final_profiles if p["paging"]),
         "paging_rows_in_increment": sum(1 for p in increment_profiles if p["paging"]),
+        # 「探索行为」配比：与名次是两个维度。换词重搜的轨迹换完词 gold 常在第 1 名，
+        # 名次看不出来，但它才是纠正「只开第一个」的主力。
+        "exploratory_rows": sum(1 for p in final_profiles if p["explored"]),
+        "exploratory_rows_in_increment": sum(
+            1 for p in increment_profiles if p["explored"]
+        ),
+        "requery_rows": sum(1 for p in final_profiles if p["distinct_queries"] >= 2),
+        "requery_rows_in_increment": sum(
+            1 for p in increment_profiles if p["distinct_queries"] >= 2
+        ),
+        "plain_rank1_rows": sum(1 for p in final_profiles if is_plain_rank1(p)),
+        "plain_rank1_rows_in_increment": sum(
+            1 for p in increment_profiles if is_plain_rank1(p)
+        ),
         "beyond_first_page_rows": sum(
             1 for p in final_profiles if p["rank"] is not None and p["rank"] > 20
         ),

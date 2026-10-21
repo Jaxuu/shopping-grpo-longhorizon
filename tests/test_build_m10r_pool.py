@@ -100,6 +100,75 @@ def make_row(task_id: int, page: list[tuple[int, str]], opens: list[str]) -> dic
     }
 
 
+def make_requery_row(task_id: int, *, second_query: str = "乳胶枕 护颈") -> dict:
+    """换词重搜的轨迹：第一次搜不到 gold，换词后 gold 排第 1 名。
+
+    这是 2026-10-21 探针量到的老师真实策略（90.9% 的轨迹会换词）。
+    它的 min 名次是 1，但教的不是「开第一个」——所以必须能进增量。
+    """
+    messages: list[dict] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "任务"},
+    ]
+    for index, (query, page) in enumerate(
+        [("乳胶枕", [(1, "A")]), (second_query, [(1, "G"), (2, "A")])]
+    ):
+        call_id = f"q{index}"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "search_products",
+                            "arguments": json.dumps({"query": query}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {"role": "tool", "tool_call_id": call_id, "content": search_observation(page)}
+        )
+    messages.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "o1",
+                    "type": "function",
+                    "function": {"name": "open_product", "arguments": json.dumps({"asin": "G"})},
+                }
+            ],
+        }
+    )
+    messages.append({"role": "tool", "tool_call_id": "o1", "content": detail_observation("G")})
+    messages.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "b1",
+                    "type": "function",
+                    "function": {"name": "buy_now", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+    messages.append({"role": "tool", "tool_call_id": "b1", "content": "购买已完成。"})
+    return {
+        "trajectory_id": f"t{task_id}",
+        "task_id": task_id,
+        "messages": messages,
+        "tools": TOOLS,
+    }
+
+
 class PurchasedAsinTest(unittest.TestCase):
     def test_last_open_before_buy(self) -> None:
         row = make_row(1, [(1, "A"), (3, "G")], ["A", "G"])
@@ -310,10 +379,25 @@ class MainTest(unittest.TestCase):
             self.run_main(pool, increment)
 
     def test_rejects_rank1_in_increment(self) -> None:
+        """没有探索行为、直接买第 1 名 ⇒ 拒收（这是要挡的那类样本）。"""
         pool = self.write("pool.jsonl", [make_row(1, [(1, "A")], ["A"])])
         increment = self.write("inc.jsonl", [make_row(2, [(1, "G")], ["G"])])
         with self.assertRaises(SystemExit):
             self.run_main(pool, increment)
+
+    def test_admits_requery_row_whose_gold_ends_up_rank1(self) -> None:
+        """换词重搜后 gold 排第 1 名 ⇒ 必须收，这是老师真实策略的示范。"""
+        pool = self.write("pool.jsonl", [make_row(1, [(1, "A")], ["A"])])
+        increment = self.write("inc.jsonl", [make_requery_row(2)])
+        self.assertEqual(self.run_main(pool, increment), 0)
+        report = json.loads((self.dir / "out" / "build_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["exploratory_rows_in_increment"], 1)
+        self.assertEqual(report["requery_rows_in_increment"], 1)
+        self.assertEqual(report["plain_rank1_rows_in_increment"], 0)
+        # 合并池里还剩 1 条「纯第 1 名」——那是旧池子本来就有的，正是要稀释的对象
+        self.assertEqual(report["plain_rank1_rows"], 1)
+        # 名次仍是 1（min 跨页），配比不能被它充成「名次≥2」
+        self.assertEqual(report["rank_ge2_rows"], 0)
 
     def test_rejects_evaluation_leak(self) -> None:
         pool = self.write("pool.jsonl", [make_row(1, [(1, "A")], ["A"])])

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# M10-R 真实采集：把探针判「可采集」的两批从老师轨迹里收上来。
+#
+# 背景（2026-10-21 探针，120 题 × 4 次，温度 0.9）
+# -------------------------------------------------
+# | 场景 | 动作率 | 可收率 | 判定 |
+# |---|---|---|---|
+# | 翻页 | 10.8% | 1.7% | 采不到 ⇒ 只能合成（老师有更省事的替代策略：换词重搜）|
+# | 换词重搜 | 90.9% | 24.2% | **可采集** |
+# | 对比候选 | 83.3% | 28.3% | **可采集** |
+#
+# 所以这两批改走真实采集：收的是**老师自己的策略**，不是脚本规定的动作序列。
+# 翻页批仍走 scripts/generate_m10_paging.py 合成。
+#
+# 用法
+# ----
+#   bash scripts/run_m10_teacher_batches.sh requery         # 采集 + 筛选
+#   bash scripts/run_m10_teacher_batches.sh compare
+#   bash scripts/run_m10_teacher_batches.sh requery select  # 只筛选（已有 raw.jsonl）
+#   bash scripts/run_m10_teacher_batches.sh requery collect # 只采集
+#
+# 断点续跑：raw.jsonl 是事实来源，重跑同一命令会跳过已完成的 (task, attempt)。
+# 已经探针采过的题会跳过，不重复花钱；筛选时把探针 raw 一起并进来。
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT}"
+
+SCENARIO="${1:-}"
+MODE="${2:-all}"
+PY="${PY:-${ROOT}/.venv/bin/python}"
+ENV_URL="${SHOPSIM_BASE_URL:-http://127.0.0.1:5700}"
+MODEL="${OPENAI_MODEL:-deepseek-v4-flash}"
+
+ATTEMPTS="${BATCH_ATTEMPTS:-4}"
+TEMPERATURE="${BATCH_TEMPERATURE:-0.9}"
+WORKERS="${BATCH_WORKERS:-8}"
+PROBE_RAW="${PROBE_RAW:-outputs/m10-teacher-probe/raw.jsonl}"
+
+case "${SCENARIO}" in
+  requery)
+    TARGETS="data/collection/m10_requery_targets.jsonl"
+    OUT_DIR="${BATCH_OUT_DIR:-outputs/m10-requery}"
+    ;;
+  compare)
+    TARGETS="data/collection/m10_compare_targets.jsonl"
+    OUT_DIR="${BATCH_OUT_DIR:-outputs/m10-compare}"
+    ;;
+  *)
+    echo "用法：bash scripts/run_m10_teacher_batches.sh {requery|compare} [all|collect|select]" >&2
+    exit 2
+    ;;
+esac
+
+check_environment() {
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --noproxy '*' "${ENV_URL}/" || true)"
+  if [[ "${code}" != "404" ]]; then
+    cat >&2 <<EOF
+环境服务不可用：${ENV_URL} 返回 ${code}（期望 404）
+先起：tmux new -s env && cd ${ROOT} && bash scripts/start_environment.sh
+EOF
+    exit 1
+  fi
+  echo "[ok] 环境服务在线：${ENV_URL}"
+}
+
+check_teacher() {
+  if [[ -z "${OPENAI_BASE_URL:-}" || -z "${OPENAI_API_KEY:-}" ]]; then
+    cat >&2 <<'EOF'
+老师 API 没配。先 source 环境文件（不要在命令行里贴 key）：
+  source ~/.m2_collect.env
+EOF
+    exit 1
+  fi
+  echo "[ok] 老师模型：${MODEL} @ ${OPENAI_BASE_URL}"
+}
+
+# 探针已经采过的题不再重复花钱。清单是同一个池子抽的，重叠部分直接用探针的轨迹。
+pending_targets() {
+  local out="$1"
+  "${PY}" - "${TARGETS}" "${PROBE_RAW}" "${out}" <<'PY'
+import json, sys
+
+targets_path, probe_path, out_path = sys.argv[1:4]
+done = set()
+try:
+    with open(probe_path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                done.add(int(json.loads(line)["task_id"]))
+except FileNotFoundError:
+    pass
+
+kept = []
+with open(targets_path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        if int(json.loads(line)["task_id"]) in done:
+            continue
+        kept.append(line)
+
+with open(out_path, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(kept) + ("\n" if kept else ""))
+print(f"  探针已采 {len(done)} 题，本批还需 {len(kept)} 题")
+PY
+}
+
+collect() {
+  check_environment
+  check_teacher
+  mkdir -p "${OUT_DIR}"
+  local targets="${OUT_DIR}/pending_targets.jsonl"
+  pending_targets "${targets}"
+  local tasks total
+  tasks="$(grep -c . "${targets}" || true)"
+  if [[ "${tasks}" -eq 0 ]]; then
+    echo "[skip] 这批题都被探针采过了，直接筛选即可："
+    echo "  bash scripts/run_m10_teacher_batches.sh ${SCENARIO} select"
+    return 0
+  fi
+  total=$(( tasks * ATTEMPTS ))
+  echo "[run] ${SCENARIO}：${tasks} 题 × ${ATTEMPTS} 次 = ${total} 条，temperature ${TEMPERATURE}，${WORKERS} 并发"
+  "${PY}" scripts/collect_sft_data.py \
+    --tasks "${targets}" \
+    --output-dir "${OUT_DIR}" \
+    --model "${MODEL}" \
+    --base-url "${ENV_URL}" \
+    --attempts-per-task "${ATTEMPTS}" \
+    --workers "${WORKERS}" \
+    --target-accepted "${total}" \
+    --temperature "${TEMPERATURE}" \
+    --max-steps 35
+}
+
+select_batch() {
+  local merged="${OUT_DIR}/raw_all.jsonl"
+  mkdir -p "${OUT_DIR}"
+  : > "${merged}"
+  if [[ -f "${PROBE_RAW}" ]]; then
+    cat "${PROBE_RAW}" >> "${merged}"
+    echo "[merge] 并入探针轨迹 ${PROBE_RAW}"
+  fi
+  if [[ -f "${OUT_DIR}/raw.jsonl" ]]; then
+    cat "${OUT_DIR}/raw.jsonl" >> "${merged}"
+    echo "[merge] 并入本批轨迹 ${OUT_DIR}/raw.jsonl"
+  fi
+  if [[ ! -s "${merged}" ]]; then
+    echo "没有可用的 raw.jsonl，先跑 collect。" >&2
+    exit 1
+  fi
+  "${PY}" scripts/select_teacher_pattern_batch.py \
+    "${merged}" \
+    --scenario "${SCENARIO}" \
+    --targets "${TARGETS}" \
+    --out-dir "${OUT_DIR}"
+  echo
+  echo "[next] 并入池子：bash scripts/run_m10r_build.sh --dry-run"
+}
+
+case "${MODE}" in
+  all)     collect; echo; select_batch ;;
+  collect) collect ;;
+  select)  select_batch ;;
+  *)
+    echo "未知模式：${MODE}（可选 all / collect / select）" >&2
+    exit 2
+    ;;
+esac
