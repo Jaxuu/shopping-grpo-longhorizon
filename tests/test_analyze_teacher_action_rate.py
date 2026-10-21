@@ -404,5 +404,35 @@ class MainTest(unittest.TestCase):
             self.assertEqual(code, 0)
 
 
+class CoverageTest(unittest.TestCase):
+    """采集中断后只剩部分数据，判定表必须显式标「样本不完整」。
+
+    2026-10-21：480 条跑到 339 条被一条异常中止，若只看判定表会误当成最终结论。
+    """
+
+    @staticmethod
+    def summaries(tasks):
+        return {
+            "paging": {
+                "tasks": tasks,
+                "trajectories": tasks * 4,
+                "attempts_per_task": 4.0,
+            }
+        }
+
+    def test_complete_sample_has_no_warning(self):
+        scenarios = {index: "paging" for index in range(40)}
+        text = module.render_coverage(self.summaries(40), scenarios)
+        self.assertNotIn("样本不完整", text)
+        self.assertIn("| 40 | 40 |", text)
+
+    def test_partial_sample_warns_and_points_to_resume(self):
+        scenarios = {index: "paging" for index in range(40)}
+        text = module.render_coverage(self.summaries(35), scenarios)
+        self.assertIn("样本不完整", text)
+        self.assertIn("35/40", text)
+        self.assertIn("续跑", text)
+
+
 if __name__ == "__main__":
     unittest.main()

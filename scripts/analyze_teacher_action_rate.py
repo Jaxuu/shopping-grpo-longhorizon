@@ -326,6 +326,41 @@ def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) ->
 HEALTHY_ERROR_CEILING = 0.5
 
 
+def render_coverage(summaries: dict[str, dict], scenarios: dict[int, str]) -> str:
+    """样本覆盖：跑了几题 / 清单几题。
+
+    采集可能中途因基础设施故障停下（2026-10-21 就发生过：480 条只跑到 339 条）。
+    只看判定表会以为那是最终结论，所以覆盖不足必须显式标出来。
+    """
+    expected = collections.Counter(scenarios.values())
+    lines = [
+        "### 样本覆盖",
+        "",
+        "| 场景 | 已跑题数 | 清单题数 | 每题次数 | 轨迹数 |",
+        "|---|---|---|---|---|",
+    ]
+    incomplete = []
+    for scenario in ("paging", "requery", "compare"):
+        row = summaries.get(scenario)
+        if row is None:
+            continue
+        want = expected.get(scenario, 0)
+        lines.append(
+            f"| {SCENARIO_LABEL[scenario]} | {row['tasks']} | {want} "
+            f"| {row['attempts_per_task']:.0f} | {row['trajectories']} |"
+        )
+        if want and row["tasks"] < want:
+            incomplete.append(f"{SCENARIO_LABEL[scenario]} {row['tasks']}/{want}")
+    if incomplete:
+        lines.append("")
+        lines.append(
+            f"⚠️ **样本不完整**（{('、'.join(incomplete))}）：判定只作方向性参考。"
+            "重跑 `bash scripts/run_m10_teacher_probe.sh collect` 会按 "
+            "`(task_id, attempt_index)` 续跑补齐，不会重采已完成的。"
+        )
+    return "\n".join(lines)
+
+
 def _cell(text, *, limit: int = 160) -> str:
     """把任意文本压成一行表格单元。"""
     flat = " ".join(str(text).split())
@@ -499,6 +534,8 @@ def main(argv=None) -> int:
         return 0
 
     print(render(summaries, threshold=args.threshold))
+    print()
+    print(render_coverage(summaries, scenarios))
     print(render_health(records))
     if error_share(records) > HEALTHY_ERROR_CEILING:
         print()
