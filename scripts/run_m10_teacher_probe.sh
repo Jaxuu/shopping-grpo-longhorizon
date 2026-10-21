@@ -171,8 +171,15 @@ case "${MODE}" in
   smoke)   smoke ;;
   api)
     # 只打 API：不带环境、不采集，几十秒。冒烟报 400 时先跑这个。
-    check_teacher
-    "${PY}" scripts/probe_teacher_api.py --model "${MODEL}"
+    # 多余参数透传，例如：... api --base-url https://... --without-session
+    # 这里只校验 key：base_url 可以由 --base-url 指定，不要求环境变量。
+    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+      echo "老师 API 没配：先 export OPENAI_API_KEY（或 source 环境文件）。" >&2
+      exit 1
+    fi
+    echo "[ok] 老师模型：${MODEL} @ ${OPENAI_BASE_URL:-（由 --base-url 指定）}"
+    shift || true
+    "${PY}" scripts/probe_teacher_api.py --model "${MODEL}" "$@"
     ;;
   *)
     echo "未知模式：${MODE}（可选 all / targets / collect / analyze / smoke / api）" >&2

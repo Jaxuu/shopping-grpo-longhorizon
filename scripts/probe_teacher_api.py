@@ -196,7 +196,7 @@ def main(argv=None) -> int:
         print("全部 200：API 侧没问题，异常在采集链路里（环境或工具调用转换）。")
         return 0
     if failures == len(variants):
-        print("全部失败：不是温度问题。按响应体查模型名 / 额度 / 鉴权。")
+        print("全部失败：不是温度问题。按响应体查模型名 / 额度 / 鉴权 / 工作区区域设置。")
         return 1
     print("部分失败：看哪一行红，就是那个参数被拒。把这张表贴回来。")
     return 1
