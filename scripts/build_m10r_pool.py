@@ -430,6 +430,20 @@ def main(argv: list[str] | None = None) -> int:
         f"gold 在第 21 名以后：{report['beyond_first_page_rows']} 条"
     )
     print("  名次分布：" + "，".join(f"{k} {v}" for k, v in report["rank_distribution"].items()))
+    # 「基础模板」= 名次第 1 且没有任何探索动作（不翻页、不换词、只开 1 个）。
+    # 这是 M10 设计里要**砍**的那一类（目标占比 35%），单看名次占比看不出来。
+    plain = report["plain_rank1_rows"]
+    plain_share = plain / len(merged) if merged else 0.0
+    print(
+        f"  基础模板（第 1 名 + 无探索 + 只开 1 个）：{plain} 条"
+        f"（{plain_share:.1%}，设计目标 ≤35%）"
+    )
+    print(
+        "  开商品数分布："
+        + "，".join(
+            f"{k} 个 {v}" for k, v in report["distinct_opens_distribution"].items()
+        )
+    )
     # 名次口径是「老师自己看到过的**最好**名次」，所以换词成功的轨迹 gold 会冒到第 1 名。
     # 这个占比降不下去不代表干预失败；想压它要用 --target-share 丢 rank-1 行，
     # 而那正好会丢掉「换词把 gold 顶上来」的样本 —— 别拿它当 M10-R 的验收指标。

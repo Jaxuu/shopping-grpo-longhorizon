@@ -92,6 +92,11 @@ echo "[3/3] 生成课程清单"
   --output "${OUT_DIR}/manifest.json"
 
 echo
+# 桶与阶段的分布直接打出来：新采的探索类轨迹几乎全进 strategy 桶，
+# 而 strategy 只在最后阶段才出现——这件事不该靠人记。
+"${PY}" scripts/show_sft_manifest.py "${OUT_DIR}/manifest.json"
+
+echo
 TRAIN_CMD=(
   bash scripts/sft_curriculum.sh
   --source "${OUT_DIR}/all.jsonl"
