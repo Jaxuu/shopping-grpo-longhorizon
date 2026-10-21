@@ -201,12 +201,24 @@ class VerdictTest(unittest.TestCase):
 
 
 class RenderTest(unittest.TestCase):
-    def test_render_lists_every_scenario(self):
-        records = {
-            "paging": [
-                {"task_id": 1, "used_next_page": True, "bought_gold": False, "requeried": False, "multi_open": False, "gave_up": False, "tool_calls": 4, "opened_distinct": 1, "distinct_queries": 1}
-            ]
+    def _record(self, **overrides):
+        base = {
+            "task_id": 1,
+            "used_next_page": False,
+            "bought_gold": False,
+            "accepted": False,
+            "requeried": False,
+            "multi_open": False,
+            "gave_up": False,
+            "tool_calls": 4,
+            "opened_distinct": 1,
+            "distinct_queries": 1,
         }
+        base.update(overrides)
+        return base
+
+    def test_render_lists_every_scenario(self):
+        records = {"paging": [self._record(used_next_page=True, bought_gold=True, accepted=True)]}
         summaries = {
             scenario: module.summarize_scenario(rows, module.SCENARIO_ACTION[scenario])
             for scenario, rows in records.items()
@@ -215,6 +227,50 @@ class RenderTest(unittest.TestCase):
         self.assertIn("翻页", text)
         self.assertIn("可采集", text)
         self.assertNotIn("换词重搜（requery） |", text)
+
+    def test_action_without_gold_is_not_harvestable(self):
+        """翻了页但没买对 ⇒ 进不了池子，不能算可收。这是用户 2026-10-21 指出的口径。"""
+        records = [
+            self._record(used_next_page=True, bought_gold=False, accepted=False),
+            self._record(used_next_page=True, bought_gold=True, accepted=True),
+        ]
+        summary = module.summarize_scenario(records, "used_next_page")
+        self.assertEqual(summary["hits"], 2)
+        self.assertEqual(summary["harvest"], 1)
+        self.assertEqual(summary["action_only"], 1)
+        self.assertAlmostEqual(summary["harvest_rate"], 0.5)
+        self.assertAlmostEqual(summary["hit_rate"], 1.0)
+
+    def test_verdict_uses_harvest_rate_not_action_rate(self):
+        """动作率 100% 但一条都没买对 ⇒ 判「采不到」。"""
+        records = [
+            self._record(used_next_page=True, bought_gold=False, accepted=False),
+        ]
+        summaries = {"paging": module.summarize_scenario(records, "used_next_page")}
+        text = module.render(summaries)
+        self.assertIn("可收率 0.0%（动作率 100.0%）", text)
+        self.assertIn("采不到，才考虑合成", text)
+
+    def test_projected_harvest_scales_with_candidates(self):
+        records = [self._record(used_next_page=True, bought_gold=True, accepted=True)]
+        summary = module.summarize_scenario(records, "used_next_page")
+        summary["attempts_per_task"] = 4.0
+        # paging 全量 158 题 × 4 次 × 100% 可收
+        self.assertEqual(module.projected_harvest("paging", summary), 158 * 4)
+
+    def test_candidate_counts_match_target_files(self):
+        """SCENARIO_CANDIDATES 必须和清单口径一致，否则「预计可收」是假的。"""
+        rows = module.load_jsonl(
+            ROOT / "data" / "collection" / "m10_paging_targets.jsonl"
+        )
+        eligible = [row for row in rows if int(row["rank"]) <= 60]
+        self.assertEqual(module.SCENARIO_CANDIDATES["paging"], len(eligible))
+        for scenario, name in (
+            ("requery", "m10_requery_targets.jsonl"),
+            ("compare", "m10_compare_targets.jsonl"),
+        ):
+            count = len(module.load_jsonl(ROOT / "data" / "collection" / name))
+            self.assertEqual(module.SCENARIO_CANDIDATES[scenario], count)
 
     def test_detail_groups_by_task(self):
         records = [

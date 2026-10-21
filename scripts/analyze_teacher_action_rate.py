@@ -7,13 +7,23 @@ M10 Step 2 的 90 题（每题 1 次、temperature 0.0）给出 6.7% / 6.7% / 3.
 按「<20% 就地关闭」把三条路全关了。但那只测了**默认行为**。本脚本判定的是：
 
     把温度提上去、同一道题多跑几次，老师会不会自己翻页 / 换词重搜 / 多开候选？
+    而且——这些轨迹里有几条**真能进训练池**？
 
-* **会**（轨迹级命中率 ≥ 20%）⇒ 走真实采集，不需要脚本合成。
-* **不会**（< 20%）⇒ 采集拿不到这个能力，才轮到合成。
+两个率，别混（2026-10-21 用户指出的口径错误）
+--------------------------------------------
+* **动作率**（``hit_rate``）：做了目标动作的轨迹占比。这是**能力证据**。
+* **可收率**（``harvest_rate``）：既做了目标动作、又**买对 gold 且过验收**的占比。
+  这是**能进池子的量**——SFT 池只收 ``gold_purchase``（``acceptance_reasons``），
+  「翻了页但没买对」的轨迹会被直接筛掉，白跑。
+
+**判定用可收率，不用动作率。** 用动作率会把「翻页 30% 但翻完买不对」误判成可采集。
+
+* 可收率 ≥ 20% ⇒ 走真实采集。
+* 可收率 < 20% ⇒ 采集补不进配比，才轮到脚本合成。
 
 阈值 20% 是预登记的（`plans/m10-dataset-design.md` 与 M10 Step 2 同一条规则），
-不随结果调整。理由：20% 的轨迹级命中率，在 158 道题 × 4 次的采集量下约能收
-120+ 条目标轨迹，够做示范；低于这个数补不进配比。
+不随结果调整。理由：20% 的可收率，在 158 道题 × 4 次的采集量下约能收 120+ 条，
+够做示范；低于这个数补不进配比。
 
 三个场景 → 目标动作
 ------------------
@@ -67,6 +77,10 @@ SCENARIO_LABEL = {
     "requery": "换词重搜",
     "compare": "对比候选",
 }
+
+#: 全量采集时的口径内题数（= 三份清单里可用的题数），用来把样本可收率换算成
+#: 「全量大概能收多少条」。与 data/collection/*.jsonl 不一致时测试会报错。
+SCENARIO_CANDIDATES = {"paging": 158, "requery": 160, "compare": 200}
 
 SEARCH_TOOL = "search_products"
 OPEN_TOOL = "open_product"
@@ -202,12 +216,18 @@ def summarize_scenario(records: list[dict], action: str) -> dict:
     gold_without_action = sum(
         1 for record in records if record["bought_gold"] and not record[action]
     )
+    # 可收 = 做了目标动作 **且** 过验收（= 能进 SFT 池）。只做动作但没买对的会被筛掉。
+    # ``accepted`` 缺失时按「不可收」处理——宁可少算，不可把进不了池子的算成可收。
+    harvest = sum(1 for record in records if record[action] and record.get("accepted"))
     return {
         "tasks": task_total,
         "trajectories": trajectories,
         "attempts_per_task": rate(trajectories, task_total),
         "hits": hits,
         "hit_rate": rate(hits, trajectories),
+        "harvest": harvest,
+        "harvest_rate": rate(harvest, trajectories),
+        "action_only": hits - harvest,
         "task_hit": task_hit,
         "task_hit_rate": rate(task_hit, task_total),
         "task_always": task_always,
@@ -236,9 +256,18 @@ def verdict(hit_rate: float, *, threshold: float = PROBE_THRESHOLD) -> str:
     return "采不到，才考虑合成"
 
 
+def projected_harvest(scenario: str, row: dict) -> int:
+    """把样本可收率外推到全量题数 × 每题次数，估「采集到底能收多少条」。"""
+    candidates = SCENARIO_CANDIDATES.get(scenario)
+    if not candidates:
+        return 0
+    attempts = row.get("attempts_per_task") or 0
+    return int(round(row["harvest_rate"] * candidates * attempts))
+
+
 def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) -> str:
     lines = [
-        "| 场景 | 题数 | 轨迹数 | 目标动作轨迹 | 轨迹级命中率 | 至少命中一次的题 | 买到 gold | 买对但没做动作 |",
+        "| 场景 | 题数 | 轨迹数 | 做了目标动作 | 动作率 | **可收（动作+买对）** | **可收率** | 做了动作但没买对 |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for scenario in ("paging", "requery", "compare"):
@@ -249,36 +278,46 @@ def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) ->
             f"| {SCENARIO_LABEL[scenario]}（{scenario}） "
             f"| {row['tasks']} | {row['trajectories']} "
             f"| {row['hits']} | {row['hit_rate']:.1%} "
-            f"| {row['task_hit']}/{row['tasks']}（{row['task_hit_rate']:.0%}） "
-            f"| {row['gold']}（{row['gold_rate']:.1%}） "
-            f"| {row['gold_without_action']} |"
+            f"| {row['harvest']} | {row['harvest_rate']:.1%} "
+            f"| {row['action_only']} |"
         )
 
     lines.append("")
     lines.append(
-        "| 场景 | 翻页次数 | 换词重搜 | 多开≥2 | 放弃 | 平均步数 | 平均开商品 | 平均查询数 |"
+        "| 场景 | 买到 gold | 买对但没做动作 | 至少命中一次的题 | 翻页次数 | 换词重搜 | 多开≥2 | 放弃 | 平均步数 | 平均开商品 |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for scenario in ("paging", "requery", "compare"):
         if scenario not in summaries:
             continue
         row = summaries[scenario]
         lines.append(
             f"| {SCENARIO_LABEL[scenario]} "
+            f"| {row['gold']}（{row['gold_rate']:.1%}） "
+            f"| {row['gold_without_action']} "
+            f"| {row['task_hit']}/{row['tasks']}（{row['task_hit_rate']:.0%}） "
             f"| {row['used_next_page']} | {row['requeried']} | {row['multi_open']} "
             f"| {row['gave_up']} | {row['mean_tool_calls']:.1f} "
-            f"| {row['mean_opened']:.2f} | {row['mean_queries']:.2f} |"
+            f"| {row['mean_opened']:.2f} |"
         )
 
     lines.append("")
-    lines.append(f"**预登记阈值 {threshold:.0%}**（不随结果调整）：")
+    lines.append(
+        f"**预登记阈值 {threshold:.0%}，按「可收率」判**（不随结果调整）。"
+        "「动作率」只说明老师**会**做，不说明轨迹**能进池子**——"
+        "SFT 池只收买对 gold 的轨迹，翻了页但没买对的会被直接筛掉。"
+    )
     for scenario in ("paging", "requery", "compare"):
         if scenario not in summaries:
             continue
         row = summaries[scenario]
+        projected = projected_harvest(scenario, row)
         lines.append(
-            f"- {SCENARIO_LABEL[scenario]}：轨迹级 {row['hit_rate']:.1%} → "
-            f"**{verdict(row['hit_rate'], threshold=threshold)}**"
+            f"- {SCENARIO_LABEL[scenario]}：可收率 {row['harvest_rate']:.1%}"
+            f"（动作率 {row['hit_rate']:.1%}）→ "
+            f"**{verdict(row['harvest_rate'], threshold=threshold)}**"
+            f"；按全量 {SCENARIO_CANDIDATES.get(scenario, 0)} 题 × "
+            f"{row['attempts_per_task']:.0f} 次推算，约可收 **{projected} 条**"
         )
     return "\n".join(lines)
 
