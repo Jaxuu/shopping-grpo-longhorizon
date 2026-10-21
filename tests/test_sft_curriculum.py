@@ -142,5 +142,31 @@ class SftCurriculumTest(unittest.TestCase):
             self.assertNotIn("--max-steps", command["train"])
 
 
+    def test_save_steps_is_threaded_and_defaults_to_epoch_only(self):
+        """定时关机靠 checkpoint 粒度续跑：0=只在 epoch 末存（历史行为）。"""
+        manifest = {
+            "stages": {
+                stage: {"epochs": 1.0, "learning_rate": 1e-4}
+                for stage in ("a", "b")
+            }
+        }
+        common = dict(
+            manifest_path=Path("manifest.json"),
+            source=Path("all.jsonl"),
+            base_model="base",
+            output_root=Path("outputs"),
+            python="python",
+        )
+        default = build_stage_commands(manifest, **common)
+        for command in default:
+            self.assertNotIn("--save-steps", command["train"])
+
+        periodic = build_stage_commands(manifest, save_steps=25, **common)
+        for command in periodic:
+            self.assertEqual(
+                command["train"][command["train"].index("--save-steps") + 1], "25"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

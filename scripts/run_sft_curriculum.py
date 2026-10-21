@@ -41,6 +41,8 @@ def build_stage_commands(
     resume_from_checkpoint=None,
     loss_scope="assistant",
     max_steps=-1,
+    save_steps=0,
+    save_total_limit=3,
 ):
     stages = stage_order(manifest)
     start_stage = start_stage or stages[0]
@@ -107,6 +109,11 @@ def build_stage_commands(
             train.append("--liger-kernel")
         if int(max_steps) > 0:
             train.extend(["--max-steps", str(int(max_steps))])
+        # 定时关机场景要的是「中断粒度」而不是「省磁盘」：LoRA checkpoint 只有几十 MB，
+        # 所以把存盘频率和保留个数都透传下去，默认仍是历史行为（epoch 末存一次）。
+        if int(save_steps) > 0:
+            train.extend(["--save-steps", str(int(save_steps))])
+        train.extend(["--save-total-limit", str(int(save_total_limit))])
         if index == 0 and resume_from_checkpoint:
             train.extend(["--resume-from-checkpoint", str(resume_from_checkpoint)])
         merge = [
@@ -153,6 +160,14 @@ def parse_args():
         help="M5 A/B 的 loss 口径；两个臂必须使用同一课程与同一口径之外的相同超参。",
     )
     parser.add_argument("--resume-from-checkpoint", type=Path)
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=0,
+        help="每多少步存一次 checkpoint（透传给每个阶段）；0=只在 epoch 末存。"
+        "定时关机 / 可能中断的长跑用它换中断粒度。",
+    )
+    parser.add_argument("--save-total-limit", type=int, default=3)
     parser.add_argument("--swanlab", action="store_true")
     parser.add_argument("--swanlab-project", default="shopping-grpo-sft-curriculum")
     parser.add_argument("--qlora", action="store_true")
@@ -192,6 +207,8 @@ def main():
             resume_from_checkpoint=args.resume_from_checkpoint,
             loss_scope=args.loss_scope,
             max_steps=args.max_steps,
+            save_steps=args.save_steps,
+            save_total_limit=args.save_total_limit,
         )
     except (KeyError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc

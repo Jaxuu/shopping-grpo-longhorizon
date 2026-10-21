@@ -9,7 +9,7 @@
 # ----
 #   bash scripts/run_m10r_pipeline.sh env      # 0. 依赖（uv sync，幂等，首次 3–5 分钟）
 #   bash scripts/run_m10r_pipeline.sh build    # 1. 建池（纯 CPU，约 2 分钟）
-#   bash scripts/run_m10r_pipeline.sh train    # 2. 训练（要显卡，约 2–2.5 小时）
+#   bash scripts/run_m10r_pipeline.sh train    # 2. 训练（要显卡，约 3.5–4 小时；被关机打断后再执行一次即续跑）
 #   bash scripts/run_m10r_pipeline.sh eval     # 3. Final-200（自带商店环境 + vLLM，40–60 分钟）
 #   bash scripts/run_m10r_pipeline.sh status   # 随时看：会话活着吗、跑到哪、显存多少
 #
@@ -20,6 +20,7 @@
 #   KEEP_TEMPLATE=700      模板保留条数（建池）
 #   LABEL=m10r-final200    评测输出目录名
 #   MODEL=...              评测权重（默认 outputs/models/sft-m10r/stage-b/merged）
+#   SAVE_STEPS=25          训练每 25 步存一次 checkpoint（定时关机时的中断粒度）
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +33,7 @@ MODEL_DIR="${ROOT}/outputs/models/sft-m10r"
 LABEL="${LABEL:-m10r-final200}"
 MODEL="${MODEL:-${MODEL_DIR}/stage-b/merged}"
 KEEP_TEMPLATE="${KEEP_TEMPLATE:-700}"
+SAVE_STEPS="${SAVE_STEPS:-25}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -83,28 +85,38 @@ step_build() {
 }
 
 # ---------------------------------------------------------------- train
+stage_done() {
+  [[ -d "${MODEL_DIR}/stage-$1/merged" ]] \
+    && [[ -n "$(ls -A "${MODEL_DIR}/stage-$1/merged" 2>/dev/null)" ]]
+}
+
+latest_checkpoint() {
+  ls -1d "${MODEL_DIR}/stage-$1/adapter"/checkpoint-* 2>/dev/null | sort -V | tail -1
+}
+
+# 断点续跑的判据只有两条，全在磁盘上：合并好的阶段算「做完」，adapter 下的
+# checkpoint-NNN 算「做到第 N 步」。所以 train 可以反复执行——它自己决定从哪接。
+plan_resume() {
+  local start="" resume=""
+  if stage_done a && stage_done b; then
+    echo "两段都已完成，没有可续的：${MODEL_DIR}/stage-b/merged" >&2
+    return 1
+  fi
+  if stage_done a; then start="b"; fi
+  if [[ -z "${start}" ]]; then
+    start="a"
+    resume="$(latest_checkpoint a || true)"
+  else
+    resume="$(latest_checkpoint b || true)"
+  fi
+  printf '%s\n%s\n' "${start}" "${resume}"
+}
+
 preflight_train() {
   local problems=0
   [[ -f "${CAPPED}/all.jsonl" ]] || { echo "缺 ${CAPPED}/all.jsonl（先跑 build）" >&2; problems=1; }
   [[ -f "${CAPPED}/manifest.json" ]] || { echo "缺 ${CAPPED}/manifest.json（先跑 build）" >&2; problems=1; }
   [[ "${problems}" -eq 0 ]] || return 1
-
-  # run_sft_curriculum 会拒绝覆盖已完成的阶段，提前说清楚，别跑到一半才报错。
-  local stale=""
-  for stage in a b; do
-    if [[ -d "${MODEL_DIR}/stage-${stage}/merged" ]] \
-       && [[ -n "$(ls -A "${MODEL_DIR}/stage-${stage}/merged" 2>/dev/null)" ]]; then
-      stale="${stale} ${MODEL_DIR}/stage-${stage}/merged"
-    fi
-  done
-  if [[ -n "${stale}" ]]; then
-    cat >&2 <<EOF
-已有训练产物，脚本会拒绝覆盖：${stale}
-要重训就先挪走：
-  mv ${MODEL_DIR} ${MODEL_DIR}.$(date +%m%d-%H%M)
-EOF
-    return 1
-  fi
 
   local used
   used="$(gpu_used_mib)"
@@ -117,10 +129,12 @@ EOF
     return 1
   fi
 
+  # 磁盘的真实开销：两段 merged 各 4–5 GB（2B bf16 全量权重），LoRA checkpoint
+  # 只有几十 MB×3，日志几十 MB ⇒ 12 GB 是能跑完的下限，留点余量到 15。
   local free
   free="$(free_gb "${ROOT}/outputs")"
-  if [[ -n "${free}" ]] && (( free < 30 )); then
-    echo "outputs 所在盘只剩 ${free} GB；两段 merged 各约 4 GB，建议先清出 30 GB。" >&2
+  if [[ -n "${free}" ]] && (( free < 12 )); then
+    echo "outputs 所在盘只剩 ${free} GB；两段 merged 要 9–10 GB，至少清到 15 GB。" >&2
     return 1
   fi
   echo "[ok] 前置检查通过（显存 ${used:-?} MiB 已用，outputs 余量 ${free:-?} GB）"
@@ -128,11 +142,29 @@ EOF
 
 step_train() {
   [[ -x "${PY}" ]] || die "找不到 Python：${PY}"
+  local plan start resume
   if [[ "${PIPELINE_DRY:-0}" == "1" ]]; then
-    echo "[dry] 跳过前置检查（PIPELINE_DRY=1）"
+    echo "[dry] 跳过显卡/磁盘检查，但仍按盘上的产物算续跑点（PIPELINE_DRY=1）"
+    plan="$(plan_resume)" || plan=$'a\n'
+    start="$(sed -n 1p <<<"${plan}")"
+    resume="$(sed -n 2p <<<"${plan}")"
   else
     preflight_train || die "前置检查没过，见上面的提示"
+    plan="$(plan_resume)" || die "没有可续的训练"
+    start="$(sed -n 1p <<<"${plan}")"
+    resume="$(sed -n 2p <<<"${plan}")"
+    if [[ "${start}" == "b" ]]; then
+      echo "[resume] A 段已完成（stage-a/merged 在盘上），从 B 段开始。"
+    fi
+    if [[ -n "${resume}" ]]; then
+      echo "[resume] 找到中途存档：${resume}"
+    else
+      echo "[start] 这一段从头开始（每 ${SAVE_STEPS} 步存一次 checkpoint）"
+    fi
   fi
+  local extra=""
+  [[ "${start}" != "a" ]] && extra="--start-stage ${start}"
+  [[ -n "${resume}" ]] && extra="${extra} --resume-from-checkpoint '${resume}'"
   # expandable_segments 是历史踩坑的固定配置（碎片回收过 4.4 GiB），别省。
   launch m10r-train \
     "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -140,8 +172,10 @@ step_train() {
        --source '${CAPPED}/all.jsonl' \
        --manifest '${CAPPED}/manifest.json' \
        --output-root '${MODEL_DIR}' \
-       --loss-scope tool-call-only"
-  echo "[提示] 约 2–2.5 小时。进度：bash scripts/run_m10r_pipeline.sh status"
+       --loss-scope tool-call-only \
+       --save-steps ${SAVE_STEPS} ${extra}"
+  echo "[提示] A 段约 1.5 小时、B 段约 2.5 小时。进度：bash scripts/run_m10r_pipeline.sh status"
+  echo "      被关机打断后再执行一次本命令即续跑（已完成的阶段会跳过）。"
 }
 
 # ---------------------------------------------------------------- eval
@@ -203,6 +237,11 @@ step_status() {
     echo
     echo "== 模型目录"
     ls -1 "${MODEL_DIR}" 2>/dev/null | sed 's/^/  /'
+    for stage in a b; do
+      local ckpt
+      ckpt="$(latest_checkpoint "${stage}")"
+      [[ -n "${ckpt}" ]] && echo "  续跑点（stage-${stage}）：$(basename "${ckpt}")"
+    done
   fi
 }
 

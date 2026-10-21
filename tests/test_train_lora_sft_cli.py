@@ -136,6 +136,8 @@ class TrainLoraSftCliTest(unittest.TestCase):
         self.assertEqual(args.lora_alpha, 32)
         self.assertEqual(args.gradient_accumulation_steps, 8)
         self.assertEqual(args.save_total_limit, 3)
+        # 0 = 只在 epoch 末存，保持历史行为；定时关机时才显式打开。
+        self.assertEqual(args.save_steps, 0)
         self.assertEqual(args.dtype, "auto")
         self.assertFalse(args.bf16)
         self.assertFalse(args.swanlab)

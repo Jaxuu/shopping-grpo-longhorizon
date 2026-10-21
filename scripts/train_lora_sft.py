@@ -98,6 +98,13 @@ def parse_args():
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--logging-steps", type=int, default=5)
     parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=0,
+        help="每多少步存一次 checkpoint；0=只在每个 epoch 末存（历史行为）。"
+        "长跑+定时关机的场景用它换中断粒度：LoRA checkpoint 只有几十 MB。",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-count", type=int, default=None)
     parser.add_argument("--train-ratio", type=float, default=None)
@@ -540,7 +547,8 @@ def main():
         gradient_checkpointing=args.gradient_checkpointing,
         use_liger_kernel=args.liger_kernel,
         logging_steps=args.logging_steps,
-        save_strategy="epoch",
+        save_strategy="steps" if args.save_steps > 0 else "epoch",
+        save_steps=args.save_steps if args.save_steps > 0 else 500,
         save_total_limit=args.save_total_limit,
         eval_strategy="epoch" if validation_examples else "no",
         report_to=report_to,
