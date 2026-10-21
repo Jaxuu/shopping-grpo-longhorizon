@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.collect_sft_data import (
+    _accepted_count,
     _build_candidates,
     _validate_args,
     batch_paths,
@@ -152,6 +153,23 @@ class CollectSftDataCliTests(unittest.TestCase):
 
         self.assertEqual(len(clients), 2)
         self.assertEqual(len({row["client_id"] for row in written}), 2)
+
+    def test_accepted_count_survives_truncated_last_line(self):
+        """进程被 kill 时末行可能只写了一半，续跑不能因此整体失败。
+
+        2026-10-22：requery 批跑到 380/480 余额耗尽，用户要续跑；
+        `_accepted_count` 是续跑的入口，半行 JSON 会让它抛异常。
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw = Path(tmpdir) / "raw.jsonl"
+            raw.write_text(
+                json.dumps({"task_id": 1, "status": "done"}) + "\n" + '{"task_id": 2, "sta',
+                encoding="utf-8",
+            )
+            with patch(
+                "scripts.collect_sft_data.acceptance_reasons", return_value=(True, [])
+            ):
+                self.assertEqual(_accepted_count(raw), 1)
 
 
 if __name__ == "__main__":

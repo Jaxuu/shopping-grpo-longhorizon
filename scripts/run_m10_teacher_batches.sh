@@ -21,11 +21,14 @@
 #   bash scripts/run_m10_teacher_batches.sh requery         # 采集 + 筛选
 #   bash scripts/run_m10_teacher_batches.sh compare
 #   bash scripts/run_m10_teacher_batches.sh paging_requery  # 只筛选，用探针已有的 raw
+#   bash scripts/run_m10_teacher_batches.sh requery status   # 盘点已跑多少、还剩多少（不花钱）
 #   bash scripts/run_m10_teacher_batches.sh requery select  # 只筛选（已有 raw.jsonl）
 #   bash scripts/run_m10_teacher_batches.sh requery collect # 只采集
 #
 # 断点续跑：raw.jsonl 是事实来源，重跑同一命令会跳过已完成的 (task, attempt)。
 # 已经探针采过的题会跳过，不重复花钱；筛选时把探针 raw 一起并进来。
+# **续跑前先跑 status**：余额/网络中断会留下没到终态的错误行，
+# 不清掉就会被当成已完成而永久跳过（status 会提示要不要 purge）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,7 +72,7 @@ case "${SCENARIO}" in
     SELECT_SCENARIO="paging"
     ;;
   *)
-    echo "用法：bash scripts/run_m10_teacher_batches.sh {requery|compare|paging_requery} [all|collect|select]" >&2
+    echo "用法：bash scripts/run_m10_teacher_batches.sh {requery|compare|paging_requery} [all|collect|select|status]" >&2
     exit 2
     ;;
 esac
@@ -199,8 +202,16 @@ case "${MODE}" in
   all)     collect; echo; select_batch ;;
   collect) collect ;;
   select)  select_batch ;;
+  status)
+    # 只读盘点：这批跑了多少、有没有需要清理的错误行、还剩多少条。
+    if [[ ! -f "${OUT_DIR}/raw.jsonl" ]]; then
+      echo "还没有任何轨迹：${OUT_DIR}/raw.jsonl 不存在。" >&2
+      exit 1
+    fi
+    "${PY}" scripts/inspect_collection_raw.py "${OUT_DIR}/raw.jsonl" --targets "${TARGETS}"
+    ;;
   *)
-    echo "未知模式：${MODE}（可选 all / collect / select）" >&2
+    echo "未知模式：${MODE}（可选 all / collect / select / status）" >&2
     exit 2
     ;;
 esac

@@ -233,7 +233,12 @@ def _accepted_count(raw_path: Path, excluded_task_ids=()) -> int:
         for line in handle:
             if not line.strip():
                 continue
-            trajectory = json.loads(line)
+            try:
+                trajectory = json.loads(line)
+            except json.JSONDecodeError:
+                # 进程被 kill / 断网时末行可能只写了一半。续跑不该因此整体失败：
+                # 半行本来就进不了池子，跳过即可（completed_task_attempts 同样跳过）。
+                continue
             if int(trajectory["task_id"]) in excluded:
                 continue
             accepted += acceptance_reasons(trajectory)[0]
