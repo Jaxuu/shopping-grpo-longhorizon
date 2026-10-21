@@ -360,6 +360,11 @@ def main() -> int:
                 print(f"collected_raw={len(written)} accepted_total={accepted}")
         except CollectionInfrastructureError as exc:
             print(f"collection paused: {exc}")
+            print(
+                "已采到的轨迹全部保留在 raw.jsonl（每完成一条就落盘一次，"
+                "在飞的那几条可能丢）。若是 402 / Insufficient Balance 就是余额用尽；"
+                "恢复后**重跑同一条命令**即可续跑，已完成的 (task, attempt) 会自动跳过。"
+            )
             exit_code = 2
 
     if not paths["raw"].exists():

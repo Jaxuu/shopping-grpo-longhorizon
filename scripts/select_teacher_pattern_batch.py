@@ -65,11 +65,27 @@ SCENARIOS = tuple(SCENARIO_ACTION)
 
 
 def read_jsonl(path: Path) -> list[dict]:
-    rows = []
+    """读 JSONL，**容忍被中断截断的末行**。
+
+    采集中断（余额耗尽、Ctrl-C、OOM、机器重启）时最后一行可能只写了一半。
+    `completed_task_attempts` 那边已经会跳过它，这里也必须跳过——否则筛选第一步
+    就 JSONDecodeError 崩掉，明明已经采到的几千条一条都用不上。
+    """
+    rows: list[dict] = []
+    skipped = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line:
+        if not line:
+            continue
+        try:
             rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            skipped += 1
+    if skipped:
+        print(
+            f"[warn] {path} 有 {skipped} 行不是合法 JSON（多半是中断截断），已跳过",
+            file=sys.stderr,
+        )
     return rows
 
 

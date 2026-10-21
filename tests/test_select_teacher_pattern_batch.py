@@ -251,6 +251,22 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(report["action"], "requeried")
         self.assertEqual(report["action_override"], "requeried")
 
+    def test_truncated_last_line_is_skipped(self):
+        """采集中断时最后一行可能只写了一半，筛选不能因此崩掉。
+
+        2026-10-21：用户余额耗尽中断在采集中途，若读 raw 不容错，
+        已经落盘的几千条一条都用不上。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "raw.jsonl"
+            good = raw_trajectory(1, queries=["差查询", "好查询"], opens=[GOLD])
+            path.write_text(
+                json.dumps(good, ensure_ascii=False) + "\n" + '{"task_id": 2, "steps": [',
+                encoding="utf-8",
+            )
+            rows = module.read_jsonl(path)
+            self.assertEqual([row["task_id"] for row in rows], [1])
+
     def test_targets_scenario_filters_mixed_target_list(self):
         """探针清单三个场景混在一个文件里，必须按 scenario 字段分。"""
         with tempfile.TemporaryDirectory() as tmp:

@@ -484,12 +484,23 @@ def load_scenarios(path: Path | None) -> dict[int, str]:
 
 
 def load_jsonl(path: Path) -> list[dict]:
-    rows = []
+    """读 JSONL，容忍中断截断的末行（采集中断时最后一行可能只写了一半）。"""
+    rows: list[dict] = []
+    skipped = 0
     with Path(path).open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                skipped += 1
+    if skipped:
+        print(
+            f"[warn] {path} 有 {skipped} 行不是合法 JSON（多半是中断截断），已跳过",
+            file=sys.stderr,
+        )
     return rows
 
 

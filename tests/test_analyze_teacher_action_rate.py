@@ -463,5 +463,22 @@ class CoverageTest(unittest.TestCase):
         self.assertIn("续跑", text)
 
 
+class TruncatedRawTest(unittest.TestCase):
+    """采集中断时最后一行可能只写了一半，判定脚本必须跳过而不是崩。"""
+
+    def test_load_jsonl_skips_truncated_last_line(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "raw.jsonl"
+            path.write_text(
+                '{"task_id": 1, "attempt_index": 0}\n{"task_id": 2, "steps": [',
+                encoding="utf-8",
+            )
+            rows = module.load_jsonl(path)
+            self.assertEqual([row["task_id"] for row in rows], [1])
+
+
 if __name__ == "__main__":
     unittest.main()
