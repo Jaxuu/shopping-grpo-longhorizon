@@ -6,13 +6,16 @@
 #   2. label   —— 给新题补离线难度标签（课程清单要用）
 #   3. manifest—— 生成课程清单（含与评测集的零重叠校验）
 #
-# 增量来源有四批，存在哪批并哪批：
-#   outputs/m10-rank2/kept.jsonl    采集筛出的「gold 名次≥2」
-#   outputs/m10-paging/kept.jsonl   合成「翻页才找到」
-#   outputs/m10-requery/kept.jsonl  合成「换查询重搜」
-#   outputs/m10-compare/kept.jsonl  合成「先开第 1 名再换」
-# 可用 RANK2_INCREMENT / PAGING_INCREMENT / REQUERY_INCREMENT /
-# COMPARE_INCREMENT 覆盖。
+# 增量来源有五批，存在哪批并哪批：
+#   outputs/m10-rank2/kept.jsonl         采集筛出的「gold 名次≥2」
+#   outputs/m10-paging/kept.jsonl        合成「翻页才找到」
+#   outputs/m10-paging-requery/kept.jsonl 翻页题里老师换词找到的真实轨迹（探针 raw 白捡）
+#   outputs/m10-requery/kept.jsonl       采集「换查询重搜」
+#   outputs/m10-compare/kept.jsonl       采集「先开第 1 名再对比」
+# 可用 RANK2_INCREMENT / PAGING_INCREMENT / PAGING_REQUERY_INCREMENT /
+# REQUERY_INCREMENT / COMPARE_INCREMENT 覆盖。
+# 注意：requery / compare 以前是脚本合成的，2026-10-21 探针判定后改走真实采集，
+# 文件名不变但内容来源变了（详见 plans/m10r-runbook.md §3.0）。
 #
 # 用法：
 #   bash scripts/run_m10r_build.sh                  # 默认不降采样（第 1 名占 52%）
@@ -35,6 +38,7 @@ PY="${PY:-${ROOT}/.venv/bin/python}"
 INCREMENT_SOURCES=(
   "${RANK2_INCREMENT:-outputs/m10-rank2/kept.jsonl}"
   "${PAGING_INCREMENT:-outputs/m10-paging/kept.jsonl}"
+  "${PAGING_REQUERY_INCREMENT:-outputs/m10-paging-requery/kept.jsonl}"
   "${REQUERY_INCREMENT:-outputs/m10-requery/kept.jsonl}"
   "${COMPARE_INCREMENT:-outputs/m10-compare/kept.jsonl}"
 )

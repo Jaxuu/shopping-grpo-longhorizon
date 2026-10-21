@@ -13,12 +13,27 @@
 口径与 `scripts/analyze_teacher_action_rate.py` **完全一致**（直接 import 它的
 `extract_trajectory`），避免「探针报 24.2%、筛出来的却不是那批」。
 
+题源场景 ≠ 目标动作（2026-10-21 全量探针发现）
+--------------------------------------------
+翻页题的 40 道题里老师买对 52 次，其中 **49 次没翻页**——它是靠换词重搜找到的
+（这批题 gold 在第 21–60 名，第一页 20 行看不到）。所以「gold 不在第一页」这个能力
+的真实示范不在翻页轨迹里，而在**翻页题的换词轨迹**里。这批数据已经在探针 raw 里，
+不用再花钱采，只要用 `--action requeried` 换个目标动作重筛一遍。
+
 用法::
 
     .venv/bin/python scripts/select_teacher_pattern_batch.py \\
         outputs/m10-requery/raw.jsonl \\
         --scenario requery \\
         --out-dir outputs/m10-requery
+
+    # 翻页题里「换词找到」的轨迹（题源场景 paging，目标动作换词）
+    .venv/bin/python scripts/select_teacher_pattern_batch.py \\
+        outputs/m10-teacher-probe/raw.jsonl \\
+        --scenario paging --action requeried \\
+        --targets data/collection/m10_teacher_probe_targets.jsonl \\
+        --targets-scenario paging \\
+        --out-dir outputs/m10-paging-requery
 
 产物：``kept.jsonl``（4 键 SFT 行，可直接给 ``run_m10r_build.sh``）、
 ``selection_report.json``（选了多少、丢了多少、为什么丢、名次画像）。
@@ -65,10 +80,18 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def task_ids_from(path: Path | None) -> set[int]:
+def task_ids_from(path: Path | None, scenario: str | None = None) -> set[int]:
+    """读清单的 task_id。``scenario`` 非空时只收该场景的行。
+
+    探针清单是三个场景混在一个文件里的（每行带 ``scenario`` 字段），
+    要只筛其中一批就必须按字段过滤，否则翻页题会被换词批一起吃掉。
+    """
     if path is None:
         return set()
-    return {int(row["task_id"]) for row in read_jsonl(path)}
+    rows = read_jsonl(path)
+    if scenario:
+        rows = [row for row in rows if str(row.get("scenario") or "") == scenario]
+    return {int(row["task_id"]) for row in rows}
 
 
 def pick_best(candidates: list[dict]) -> dict:
@@ -94,9 +117,14 @@ def select(
     targets: set[int] | None = None,
     excluded: set[int] | None = None,
     max_steps: int | None = None,
+    action_override: str | None = None,
 ) -> tuple[list[dict], dict]:
-    """返回 (选中的原始轨迹, 报告)。"""
-    action = SCENARIO_ACTION[scenario]
+    """返回 (选中的原始轨迹, 报告)。
+
+    ``action_override`` 用来把「题源场景」和「目标动作」解耦：翻页题的 raw 里
+    也可以只收换词轨迹（老师在这批题上主要靠换词找到 gold）。
+    """
+    action = action_override or SCENARIO_ACTION[scenario]
     targets = targets or set()
     excluded = excluded or set()
 
@@ -171,6 +199,7 @@ def select(
     report = {
         "scenario": scenario,
         "action": action,
+        "action_override": action_override,
         "counts": dict(sorted(stats.items())),
         "rejections": rejections,
     }
@@ -216,6 +245,18 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("raw", type=Path, help="采集产物 raw.jsonl")
     parser.add_argument("--scenario", choices=SCENARIOS, required=True)
+    parser.add_argument(
+        "--action",
+        choices=sorted(set(SCENARIO_ACTION.values())),
+        default=None,
+        help="覆盖场景默认的目标动作（例如在翻页题的 raw 里只收换词重搜轨迹）",
+    )
+    parser.add_argument(
+        "--targets-scenario",
+        choices=SCENARIOS,
+        default=None,
+        help="清单里混了多个场景时，只收 scenario 字段等于它的题",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--targets",
@@ -252,9 +293,10 @@ def main(argv=None) -> int:
     chosen, report = select(
         rows,
         scenario=args.scenario,
-        targets=task_ids_from(args.targets),
+        targets=task_ids_from(args.targets, args.targets_scenario),
         excluded=excluded,
         max_steps=args.max_steps,
+        action_override=args.action,
     )
     if not chosen:
         print("一条都没选中。看 report 里的 counts / rejections。", file=sys.stderr)
@@ -275,7 +317,12 @@ def main(argv=None) -> int:
     )
 
     counts = report["counts"]
-    print(f"场景 {SCENARIO_LABEL[args.scenario]}（{args.scenario}）")
+    print(
+        f"场景 {SCENARIO_LABEL[args.scenario]}（{args.scenario}）"
+        f" · 目标动作 {report['action']}"
+    )
+    if args.targets_scenario:
+        print(f"  题源：清单里 scenario={args.targets_scenario} 的题")
     print(
         f"  读到 {counts.get('total', 0)} 条 · 过验收 {counts.get('total', 0) - counts.get('rejected_not_accepted', 0)}"
         f" · 有目标动作 {counts.get('tasks_with_candidates', 0)} 题 · 选中 {len(kept)} 题"

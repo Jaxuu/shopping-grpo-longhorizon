@@ -212,6 +212,45 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(len(chosen), 1)
         self.assertEqual(report["action"], "multi_open")
 
+    def test_action_override_decouples_source_scenario_from_action(self):
+        """翻页题里「换词找到」的轨迹：默认口径（翻页）会丢，覆盖后能收。
+
+        这是 2026-10-21 全量探针的发现：翻页题 40 道买对 52 次，其中 49 次没翻页，
+        是换词找到的。这批轨迹已经在探针 raw 里，改个目标动作就能白捡。
+        """
+        row = raw_trajectory(9, queries=["差查询", "好查询"], opens=[GOLD])
+
+        dropped, report = module.select([row], scenario="paging")
+        self.assertEqual(dropped, [])
+        self.assertEqual(report["counts"]["rejected_no_target_action"], 1)
+        self.assertEqual(report["action"], "used_next_page")
+
+        chosen, report = module.select(
+            [row], scenario="paging", action_override="requeried"
+        )
+        self.assertEqual(len(chosen), 1)
+        self.assertEqual(report["action"], "requeried")
+        self.assertEqual(report["action_override"], "requeried")
+
+    def test_targets_scenario_filters_mixed_target_list(self):
+        """探针清单三个场景混在一个文件里，必须按 scenario 字段分。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "targets.jsonl"
+            path.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False) + "\n"
+                    for row in [
+                        {"task_id": 1, "scenario": "paging"},
+                        {"task_id": 2, "scenario": "requery"},
+                        {"task_id": 3, "scenario": "paging"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(module.task_ids_from(path), {1, 2, 3})
+            self.assertEqual(module.task_ids_from(path, "paging"), {1, 3})
+            self.assertEqual(module.task_ids_from(path, "compare"), set())
+
 
 class SftRowTest(unittest.TestCase):
     def test_rows_have_four_keys_and_pass_curriculum_validation(self):
@@ -290,6 +329,62 @@ class MainTest(unittest.TestCase):
             )
             self.assertEqual(report["kept"], 1)
             self.assertEqual(report["counts"]["rejected_no_target_action"], 1)
+
+    def test_cli_action_and_targets_scenario(self):
+        """命令行把 --action / --targets-scenario 接上了（argparse 漏接会静默失效）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw = tmp_path / "raw.jsonl"
+            raw.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False) + "\n"
+                    for row in [
+                        raw_trajectory(1, queries=["差查询", "好查询"], opens=[GOLD]),
+                        raw_trajectory(2, queries=["差查询", "好查询"], opens=[GOLD]),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            targets = tmp_path / "targets.jsonl"
+            targets.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False) + "\n"
+                    for row in [
+                        {"task_id": 1, "scenario": "paging"},
+                        {"task_id": 2, "scenario": "requery"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            empty = tmp_path / "empty.jsonl"
+            empty.write_text("", encoding="utf-8")
+
+            code = module.main(
+                [
+                    str(raw),
+                    "--scenario",
+                    "paging",
+                    "--action",
+                    "requeried",
+                    "--targets",
+                    str(targets),
+                    "--targets-scenario",
+                    "paging",
+                    "--out-dir",
+                    str(tmp_path / "out"),
+                    "--exclude-pool",
+                    str(empty),
+                    "--exclude-evaluation",
+                    str(empty),
+                ]
+            )
+            self.assertEqual(code, 0)
+            kept = [
+                json.loads(line)
+                for line in (tmp_path / "out" / "kept.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            # 只收 paging 场景的题（task 1），换词动作命中
+            self.assertEqual([row["task_id"] for row in kept], [1])
 
     def test_empty_selection_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:

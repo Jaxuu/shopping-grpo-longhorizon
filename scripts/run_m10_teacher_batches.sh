@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # M10-R 真实采集：把探针判「可采集」的两批从老师轨迹里收上来。
 #
-# 背景（2026-10-21 探针，120 题 × 4 次，温度 0.9）
-# -------------------------------------------------
+# 背景（2026-10-21 探针全量 480 条，120 题 × 4 次，温度 0.9）
+# -------------------------------------------------------
 # | 场景 | 动作率 | 可收率 | 判定 |
 # |---|---|---|---|
-# | 翻页 | 10.8% | 1.7% | 采不到 ⇒ 只能合成（老师有更省事的替代策略：换词重搜）|
-# | 换词重搜 | 90.9% | 24.2% | **可采集** |
-# | 对比候选 | 83.3% | 28.3% | **可采集** |
+# | 翻页 | 15.6% | 1.9% | 采不到 ⇒ 合成（老师有更省事的替代策略：换词重搜）|
+# | 换词重搜 | 83.1% | 25.0% | **可采集** |
+# | 对比候选 | 81.9% | 27.5% | **可采集** |
 #
 # 所以这两批改走真实采集：收的是**老师自己的策略**，不是脚本规定的动作序列。
 # 翻页批仍走 scripts/generate_m10_paging.py 合成。
+#
+# 第三批是白捡的：翻页题 40 道里老师买对 52 次，其中 49 次没翻页而是换词找到的
+# （这批题 gold 在第 21–60 名，第一页看不到）。这批轨迹已经在探针 raw 里，
+# 用 paging_requery 模式重筛即可，**不花一分钱、不跑采集**。
 #
 # 用法
 # ----
 #   bash scripts/run_m10_teacher_batches.sh requery         # 采集 + 筛选
 #   bash scripts/run_m10_teacher_batches.sh compare
+#   bash scripts/run_m10_teacher_batches.sh paging_requery  # 只筛选，用探针已有的 raw
 #   bash scripts/run_m10_teacher_batches.sh requery select  # 只筛选（已有 raw.jsonl）
 #   bash scripts/run_m10_teacher_batches.sh requery collect # 只采集
 #
@@ -37,17 +42,34 @@ TEMPERATURE="${BATCH_TEMPERATURE:-0.9}"
 WORKERS="${BATCH_WORKERS:-8}"
 PROBE_RAW="${PROBE_RAW:-outputs/m10-teacher-probe/raw.jsonl}"
 
+# 可选覆盖项：目标动作（与题源场景解耦）与「只收清单里某场景的题」。
+TARGETS_SCENARIO=""
+ACTION=""
+SELECT_ONLY=0
+SELECT_SCENARIO=""
+
 case "${SCENARIO}" in
   requery)
     TARGETS="data/collection/m10_requery_targets.jsonl"
     OUT_DIR="${BATCH_OUT_DIR:-outputs/m10-requery}"
+    SELECT_SCENARIO="requery"
     ;;
   compare)
     TARGETS="data/collection/m10_compare_targets.jsonl"
     OUT_DIR="${BATCH_OUT_DIR:-outputs/m10-compare}"
+    SELECT_SCENARIO="compare"
+    ;;
+  paging_requery)
+    # 题源场景是翻页，但收的是换词轨迹 ⇒ 筛选用 --scenario paging --action requeried
+    TARGETS="data/collection/m10_teacher_probe_targets.jsonl"
+    OUT_DIR="${BATCH_OUT_DIR:-outputs/m10-paging-requery}"
+    TARGETS_SCENARIO="paging"
+    ACTION="requeried"
+    SELECT_ONLY=1
+    SELECT_SCENARIO="paging"
     ;;
   *)
-    echo "用法：bash scripts/run_m10_teacher_batches.sh {requery|compare} [all|collect|select]" >&2
+    echo "用法：bash scripts/run_m10_teacher_batches.sh {requery|compare|paging_requery} [all|collect|select]" >&2
     exit 2
     ;;
 esac
@@ -110,6 +132,10 @@ PY
 }
 
 collect() {
+  if [[ "${SELECT_ONLY}" -eq 1 ]]; then
+    echo "[skip] ${SCENARIO} 不采集：这批轨迹已经在 ${PROBE_RAW} 里，直接筛选。"
+    return 0
+  fi
   check_environment
   check_teacher
   mkdir -p "${OUT_DIR}"
@@ -152,10 +178,18 @@ select_batch() {
     echo "没有可用的 raw.jsonl，先跑 collect。" >&2
     exit 1
   fi
+  local extra=()
+  if [[ -n "${ACTION}" ]]; then
+    extra+=(--action "${ACTION}")
+  fi
+  if [[ -n "${TARGETS_SCENARIO}" ]]; then
+    extra+=(--targets-scenario "${TARGETS_SCENARIO}")
+  fi
   "${PY}" scripts/select_teacher_pattern_batch.py \
     "${merged}" \
-    --scenario "${SCENARIO}" \
+    --scenario "${SELECT_SCENARIO}" \
     --targets "${TARGETS}" \
+    ${extra[@]+"${extra[@]}"} \
     --out-dir "${OUT_DIR}"
   echo
   echo "[next] 并入池子：bash scripts/run_m10r_build.sh --dry-run"
