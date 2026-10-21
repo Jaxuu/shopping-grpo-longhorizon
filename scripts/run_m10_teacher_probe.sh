@@ -112,16 +112,19 @@ smoke() {
   # 冒烟必须自带诊断：3 条轨迹全部 has_error 时，上面那行 summary 只说明「跑完了」，
   # 不说明「跑对了」。这里直接把异常类型和调用栈打出来。
   echo
-  "${PY}" scripts/analyze_teacher_action_rate.py \
+  # 用退出码判「判定是否有效」（3 = 异常太多）。不要 grep JSON 里的 "error"
+  # 子串——观测文本里出现这个词是正常的，会造成误报。
+  if ! "${PY}" scripts/analyze_teacher_action_rate.py \
     "${tmp}/raw.jsonl" \
     --targets "${tmp}/targets.jsonl" \
-    --detail
-
-  if grep -q '"error"' "${tmp}/raw.jsonl" 2>/dev/null; then
+    --detail; then
     echo
     echo "[smoke] ⚠️ 有轨迹带异常。下一步不是跑全量，是先看 API 到底返回什么："
     echo "  bash scripts/run_m10_teacher_probe.sh api"
+    exit 1
   fi
+  echo
+  echo "[smoke] 无异常，可以跑全量：bash scripts/run_m10_teacher_probe.sh"
 }
 
 collect() {
@@ -171,15 +174,8 @@ case "${MODE}" in
   smoke)   smoke ;;
   api)
     # 只打 API：不带环境、不采集，几十秒。冒烟报 400 时先跑这个。
-    # 多余参数透传，例如：... api --base-url https://... --without-session
-    # 这里只校验 key：base_url 可以由 --base-url 指定，不要求环境变量。
-    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-      echo "老师 API 没配：先 export OPENAI_API_KEY（或 source 环境文件）。" >&2
-      exit 1
-    fi
-    echo "[ok] 老师模型：${MODEL} @ ${OPENAI_BASE_URL:-（由 --base-url 指定）}"
-    shift || true
-    "${PY}" scripts/probe_teacher_api.py --model "${MODEL}" "$@"
+    check_teacher
+    "${PY}" scripts/probe_teacher_api.py --model "${MODEL}"
     ;;
   *)
     echo "未知模式：${MODE}（可选 all / targets / collect / analyze / smoke / api）" >&2

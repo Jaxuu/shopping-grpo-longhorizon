@@ -318,6 +318,21 @@ class MainTest(unittest.TestCase):
             code = module.main([str(raw), "--targets", str(manifest)])
             self.assertEqual(code, 1, "一条都对不上时必须报错，不能静默给 0")
 
+    def test_high_error_share_exits_3(self):
+        """退出码 3 = 判定无效，调用方靠它决定要不要继续跑全量。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw.jsonl"
+            bad = trajectory(1, [])
+            bad["status"] = "error"
+            bad["error"] = {"type": "HTTPError", "message": "HTTP Error 400"}
+            raw.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+            manifest = Path(tmp) / "targets.jsonl"
+            manifest.write_text(
+                json.dumps({"task_id": 1, "scenario": "paging"}) + "\n", encoding="utf-8"
+            )
+            code = module.main([str(raw), "--targets", str(manifest)])
+            self.assertEqual(code, 3)
+
     def test_json_output_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw.jsonl"

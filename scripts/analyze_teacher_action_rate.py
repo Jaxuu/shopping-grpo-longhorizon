@@ -467,6 +467,10 @@ def main(argv=None) -> int:
             "**判定作废**：异常太多，命中率不能解释成「老师不做」。"
             "先跑 `bash scripts/run_m10_teacher_probe.sh api` 看老师 API 到底返回什么。"
         )
+        # 退出码 3 = 判定无效（区别于 0 正常、1 输入有问题）。
+        # 调用方（run_m10_teacher_probe.sh）靠它决定要不要继续跑全量，
+        # 不要用 grep 找 JSON 里的 "error" 子串——那是结构判断，不是文本匹配。
+        return 3
     if pool_baseline:
         total = pool_baseline["trajectories"]
         print()
