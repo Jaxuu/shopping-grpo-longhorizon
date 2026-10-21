@@ -121,6 +121,7 @@ def extract_trajectory(row: dict) -> dict:
     terminal = row.get("terminal_result") or {}
     detail = terminal.get("reward_detail") or {}
     accepted, reasons = acceptance_reasons(row)
+    error = row.get("error") or {}
     summary.update(
         {
             "task_id": int(row.get("task_id") or 0),
@@ -130,9 +131,20 @@ def extract_trajectory(row: dict) -> dict:
             "reward_type": detail.get("reward_type"),
             "accepted": bool(accepted),
             "reject_reasons": list(reasons),
+            "error_type": str(error.get("type") or ""),
+            "error_message": str(error.get("message") or ""),
+            "error_tail": traceback_tail(error.get("traceback")),
         }
     )
     return summary
+
+
+def traceback_tail(traceback_text, *, lines: int = 3) -> str:
+    """调用栈末尾若干行——异常类型往往看不出原因，最后几行才有信息。"""
+    if not traceback_text:
+        return ""
+    parts = [line.strip() for line in str(traceback_text).splitlines() if line.strip()]
+    return "\n".join(parts[-lines:])
 
 
 def extract_messages(row: dict) -> dict:
@@ -271,6 +283,61 @@ def render(summaries: dict[str, dict], *, threshold: float = PROBE_THRESHOLD) ->
     return "\n".join(lines)
 
 
+#: 异常占比超过它就拒绝给判定：分不清「老师不做」和「根本没跑起来」。
+HEALTHY_ERROR_CEILING = 0.5
+
+
+def _cell(text, *, limit: int = 160) -> str:
+    """把任意文本压成一行表格单元。"""
+    flat = " ".join(str(text).split())
+    if len(flat) > limit:
+        flat = flat[: limit - 1] + "…"
+    return flat.replace("|", "\\|")
+
+
+def error_share(records: list[dict]) -> float:
+    return rate(sum(1 for record in records if record.get("error_type")), len(records))
+
+
+def render_health(records: list[dict]) -> str:
+    """运行健康度：没跑起来的轨迹必须先修，否则命中率是假 0。"""
+    status = collections.Counter(str(record.get("status")) for record in records)
+    lines = ["", "### 运行健康度", "", "| status | 条数 |", "|---|---|"]
+    for name, count in status.most_common():
+        lines.append(f"| {name} | {count} |")
+
+    errors = collections.Counter(
+        record["error_type"] for record in records if record.get("error_type")
+    )
+    if not errors:
+        lines.append("")
+        lines.append("无异常轨迹。")
+        return "\n".join(lines)
+
+    lines += ["", "| 异常类型 | 条数 | 示例 |", "|---|---|---|"]
+    for error_type, count in errors.most_common():
+        sample = next(
+            record for record in records if record.get("error_type") == error_type
+        )
+        lines.append(
+            f"| {error_type} | {count} | {_cell(sample.get('error_message'))} |"
+        )
+    first = next(record for record in records if record.get("error_type"))
+    if first.get("error_tail"):
+        lines += ["", "第一条异常的调用栈末尾：", "", "```", first["error_tail"], "```"]
+
+    share = error_share(records)
+    if share > HEALTHY_ERROR_CEILING:
+        lines += [
+            "",
+            f"⚠️ **{share:.0%} 的轨迹带异常，超过 {HEALTHY_ERROR_CEILING:.0%} 上限："
+            "下面的命中率不可用于判定。先修异常再重跑。**",
+        ]
+    else:
+        lines += ["", f"异常占比 {share:.0%}（上限 {HEALTHY_ERROR_CEILING:.0%}）。"]
+    return "\n".join(lines)
+
+
 def render_detail(records: list[dict], scenarios: dict[int, str]) -> str:
     grouped: dict[tuple[str, int], list[dict]] = collections.defaultdict(list)
     for record in records:
@@ -383,12 +450,23 @@ def main(argv=None) -> int:
             "threshold": args.threshold,
             "scenarios": summaries,
             "unknown_task_ids": unknown,
+            "error_share": error_share(records),
+            "error_types": collections.Counter(
+                record["error_type"] for record in records if record.get("error_type")
+            ),
             "pool_baseline": pool_baseline,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     print(render(summaries, threshold=args.threshold))
+    print(render_health(records))
+    if error_share(records) > HEALTHY_ERROR_CEILING:
+        print()
+        print(
+            "**判定作废**：异常太多，命中率不能解释成「老师不做」。"
+            "先跑 `bash scripts/run_m10_teacher_probe.sh smoke` 定位异常。"
+        )
     if pool_baseline:
         total = pool_baseline["trajectories"]
         print()

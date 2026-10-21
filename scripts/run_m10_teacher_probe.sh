@@ -108,8 +108,13 @@ smoke() {
     --temperature "${PROBE_TEMPERATURE}" \
     --max-steps 35
   echo "[smoke] 通过：raw 里有 $(wc -l < "${tmp}/raw.jsonl") 条轨迹。"
-  echo "[smoke] 看一眼它做了什么（可选）："
-  echo "  ${PY} scripts/analyze_teacher_action_rate.py ${tmp}/raw.jsonl --targets ${tmp}/targets.jsonl --detail"
+  # 冒烟必须自带诊断：3 条轨迹全部 has_error 时，上面那行 summary 只说明「跑完了」，
+  # 不说明「跑对了」。这里直接把异常类型和调用栈打出来。
+  echo
+  "${PY}" scripts/analyze_teacher_action_rate.py \
+    "${tmp}/raw.jsonl" \
+    --targets "${tmp}/targets.jsonl" \
+    --detail
 }
 
 collect() {

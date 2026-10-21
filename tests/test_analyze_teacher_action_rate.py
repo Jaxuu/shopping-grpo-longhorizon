@@ -226,6 +226,70 @@ class RenderTest(unittest.TestCase):
         self.assertIn("买对 1/2", text)
 
 
+class HealthTest(unittest.TestCase):
+    """没跑起来的轨迹必须先暴露出来，否则命中率是假 0。"""
+
+    def test_traceback_tail_keeps_last_lines(self):
+        text = "Traceback (most recent call last):\n  File a.py\n  File b.py\nValueError: bad"
+        self.assertEqual(
+            module.traceback_tail(text), "File a.py\nFile b.py\nValueError: bad"
+        )
+        self.assertEqual(module.traceback_tail(text, lines=1), "ValueError: bad")
+
+    def test_traceback_tail_handles_empty(self):
+        self.assertEqual(module.traceback_tail(None), "")
+        self.assertEqual(module.traceback_tail("  \n \n"), "")
+
+    def test_healthy_records_report_no_error(self):
+        records = [{"status": "done", "error_type": ""}]
+        text = module.render_health(records)
+        self.assertIn("无异常轨迹", text)
+        self.assertNotIn("判定作废", text)
+
+    def test_error_type_and_message_are_printed(self):
+        records = [
+            {
+                "status": "error",
+                "error_type": "HTTPError",
+                "error_message": "HTTP Error 400: Bad Request",
+                "error_tail": "ValueError: bad temperature",
+            }
+        ]
+        text = module.render_health(records)
+        self.assertIn("HTTPError", text)
+        self.assertIn("400", text)
+        self.assertIn("ValueError: bad temperature", text)
+        self.assertIn("不可用于判定", text, "100% 异常必须报警")
+
+    def test_error_share_below_ceiling_does_not_warn(self):
+        records = [
+            {"status": "done", "error_type": ""},
+            {"status": "done", "error_type": ""},
+            {"status": "done", "error_type": ""},
+            {"status": "error", "error_type": "HTTPError", "error_message": "x"},
+        ]
+        text = module.render_health(records)
+        self.assertIn("异常占比 25%", text)
+        self.assertNotIn("不可用于判定", text)
+
+    def test_error_share_counts_only_errors(self):
+        records = [{"error_type": "HTTPError"}, {"error_type": ""}, {"error_type": ""}]
+        self.assertAlmostEqual(module.error_share(records), 1 / 3)
+
+    def test_error_fields_survive_extraction(self):
+        row = trajectory(1, [step("buy_now")])
+        row["status"] = "error"
+        row["error"] = {
+            "type": "HTTPError",
+            "message": "HTTP Error 400",
+            "traceback": "a\nb\nHTTPError: HTTP Error 400",
+        }
+        record = module.extract_trajectory(row)
+        self.assertEqual(record["error_type"], "HTTPError")
+        self.assertIn("400", record["error_message"])
+        self.assertIn("HTTPError: HTTP Error 400", record["error_tail"])
+
+
 class LoadScenariosTest(unittest.TestCase):
     def test_missing_file_returns_empty(self):
         self.assertEqual(module.load_scenarios(Path("no/such/file.jsonl")), {})
