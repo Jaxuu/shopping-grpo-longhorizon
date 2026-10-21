@@ -24,6 +24,23 @@ STAGE_CONFIG = {
         "learning_rate": 5e-5,
     },
 }
+# 「倒序课程」（2026-10-22 起，M10-R 用）：先集中学最稀缺、最想改变的行为，
+# 再扩展到全分布。和上面那套「由易到难」的区别不是顺序好看，而是曝光比：
+#   由易到难：模板被练 3 遍、探索只练 1 遍（曝光比 0.19）——与目标相反；
+#   倒序：探索 2 遍、模板 1 遍（曝光比 ~1.45）——把稀缺行为抬到多数。
+BEHAVIOR_STAGE_CONFIG = {
+    "a": {"buckets": ["exploratory"], "epochs": 1.0, "learning_rate": 1e-4},
+    "b": {
+        "buckets": ["exploratory", "template", "other"],
+        "epochs": 1.0,
+        "learning_rate": 5e-5,
+    },
+}
+BUCKET_MODES = ("difficulty", "behavior")
+# 只有 next_page 算「翻页探索」。**prev_page 不算**——它是「从商品详情退回列表」
+# 的常规导航，池子里出现 2,032 次，把它算成探索会让 1,098 条模板轨迹被误判成探索
+# （2026-10-22 实测：误判后模板只剩 154 条，而真实是 1,108 条）。
+PAGING_TOOLS = frozenset({"next_page"})
 GUARD_MARKERS = ("guard rejected", "action guard", "动作守卫拒绝", "guard_violation")
 ASIN_PATTERN = re.compile(r"(?:^|\n)asin:\s*([^\n]+)")
 
@@ -109,6 +126,63 @@ def _bucket(label: dict) -> str:
     return "strategy"
 
 
+def behavior_profile(row: dict) -> dict:
+    """一条轨迹的「行为画像」：搜了几次、换没换词、开几个、翻没翻页。
+
+    与 ``scripts/build_m10r_pool.describe_row`` 的口径一致（探索 = 翻页 / 换词 /
+    开≥2 个），但**不依赖工具返回文本**：这里直接读 tool call 的参数，
+    因为课程分桶只需要「做了什么」，不需要「看到了什么」。
+    """
+    queries: list[str] = []
+    opened: list[str] = []
+    paging = False
+    steps = 0
+    for message in row.get("messages") or []:
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            name = str(function.get("name") or "")
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            steps += 1
+            if name == "search_products":
+                queries.append(" ".join(str(arguments.get("query") or "").split()).casefold())
+            elif name == "open_product":
+                opened.append(str(arguments.get("asin") or ""))
+            elif name in PAGING_TOOLS:
+                paging = True
+    distinct_queries = len({query for query in queries if query})
+    distinct_opens = len({asin for asin in opened if asin})
+    return {
+        "steps": steps,
+        "searches": len(queries),
+        "distinct_queries": distinct_queries,
+        "opens": len(opened),
+        "distinct_opens": distinct_opens,
+        "paging": paging,
+        # 与 build_m10r_pool.describe_row 同一个定义：三个动作任一出现就算探索过。
+        "explored": bool(paging or distinct_opens >= 2 or distinct_queries >= 2),
+    }
+
+
+def behavior_bucket(profile: dict) -> str:
+    """行为分桶：探索 / 模板（单搜单开）/ 其他。
+
+    「模板」= 没做过任何探索动作，且只搜一次、只开一个。这类轨迹教的是
+    「看到第一个就买」，正是要**减少**曝光的那一类；旧课程把它练了三遍。
+    """
+    if profile["explored"]:
+        return "exploratory"
+    if profile["searches"] <= 1 and profile["opens"] <= 1:
+        return "template"
+    return "other"
+
+
 def _split(ids: list[int], *, seed: int, validation_ratio: float) -> tuple[list[int], list[int]]:
     ordered = sorted(
         ids,
@@ -127,9 +201,18 @@ def build_manifest(
     evaluation_ids: set[int],
     seed: int = 20260814,
     validation_ratio: float = 0.1,
+    bucket_mode: str = "difficulty",
 ) -> dict:
     if not 0 <= validation_ratio < 1:
         raise ValueError("validation_ratio must be in [0, 1)")
+    if bucket_mode not in BUCKET_MODES:
+        raise ValueError(f"bucket_mode must be one of {BUCKET_MODES}")
+    stage_config = STAGE_CONFIG if bucket_mode == "difficulty" else BEHAVIOR_STAGE_CONFIG
+    bucket_names = list(
+        dict.fromkeys(
+            name for config in stage_config.values() for name in config["buckets"]
+        )
+    )
     row_ids = [int(row["task_id"]) for row in rows]
     label_ids = [int(label["task_id"]) for label in labels]
     if len(set(row_ids)) != len(row_ids):
@@ -143,7 +226,7 @@ def build_manifest(
         raise ValueError(f"evaluation overlap: {overlap[:10]}")
 
     labels_by_id = {int(label["task_id"]): label for label in labels}
-    bucket_ids = {name: [] for name in ("foundation", "constraints", "strategy")}
+    bucket_ids = {name: [] for name in bucket_names}
     review = {
         "candidate_comparison_under_evidenced": [],
         "consecutive_exact_action": [],
@@ -161,7 +244,10 @@ def build_manifest(
         if label.get("difficulty") not in limits:
             raise ValueError(f"task {task_id}: invalid difficulty")
         calls = _validate_row(row)
-        bucket_ids[_bucket(label)].append(task_id)
+        if bucket_mode == "difficulty":
+            bucket_ids[_bucket(label)].append(task_id)
+        else:
+            bucket_ids[behavior_bucket(behavior_profile(row))].append(task_id)
         opened_asins = set()
         for message in row.get("messages") or []:
             if message.get("role") != "tool":
@@ -188,7 +274,7 @@ def build_manifest(
             "validation_task_ids": validation,
         }
     stages = {}
-    for name, config in STAGE_CONFIG.items():
+    for name, config in stage_config.items():
         selected = config["buckets"]
         stages[name] = {
             **config,
@@ -205,6 +291,7 @@ def build_manifest(
         "schema_version": SCHEMA_VERSION,
         "split_seed": int(seed),
         "validation_ratio": float(validation_ratio),
+        "bucket_mode": bucket_mode,
         "counts": {
             "rows": len(rows),
             "train": train_count,
@@ -233,6 +320,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260814)
     parser.add_argument("--validation-ratio", type=float, default=0.1)
     parser.add_argument(
+        "--bucket-mode",
+        choices=BUCKET_MODES,
+        default="difficulty",
+        help=(
+            "difficulty = 旧的三段「由易到难」（模板会被练 3 遍，探索 1 遍）；"
+            "behavior = 倒序两段「先探索后全量」（探索 2 遍，模板 1 遍）"
+        ),
+    )
+    parser.add_argument(
         "--admission-contract",
         default=None,
         help="Stamp manifest.admission with this contract version (M4 rebuild keeps it).",
@@ -252,6 +348,7 @@ def main() -> int:
         evaluation_ids=evaluation_ids,
         seed=args.seed,
         validation_ratio=args.validation_ratio,
+        bucket_mode=args.bucket_mode,
     )
     manifest["source"] = {
         "path": _portable_path(args.source, root),

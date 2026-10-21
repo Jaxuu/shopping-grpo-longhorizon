@@ -24,12 +24,21 @@ import argparse
 import json
 from pathlib import Path
 
-STAGE_LABEL = {"a": "A 打基础", "b": "B 加约束", "c": "C 加策略"}
+STAGE_LABEL_DIFFICULTY = {"a": "A 打基础", "b": "B 加约束", "c": "C 加策略"}
+STAGE_LABEL_BEHAVIOR = {"a": "A 学探索", "b": "B 全量收敛"}
 BUCKET_LABEL = {
     "foundation": "基础（simple）",
     "constraints": "约束（medium 且不需换词/对比）",
     "strategy": "策略（hard 或需换词/对比）",
+    "exploratory": "探索（翻页/换词/开≥2）",
+    "template": "模板（单搜单开）",
+    "other": "其他",
 }
+
+
+def stage_labels(manifest: dict) -> dict:
+    mode = manifest.get("bucket_mode", "difficulty")
+    return STAGE_LABEL_BEHAVIOR if mode == "behavior" else STAGE_LABEL_DIFFICULTY
 
 
 def load(path: Path) -> dict:
@@ -45,7 +54,9 @@ def render(manifest: dict) -> str:
         f" · validation {counts.get('validation', 0)}"
         f" · 与评测集重叠 {counts.get('evaluation_overlap', 0)}",
         "",
-        "## 桶（按难度标签分，不是按轨迹类型分）",
+        "## 桶（按行为分：探索 / 模板 / 其他）"
+        if manifest.get("bucket_mode") == "behavior"
+        else "## 桶（按难度标签分，不是按轨迹类型分）",
         "",
         "| 桶 | 行数 | train | validation | 占池子 |",
         "|---|---:|---:|---:|---:|",
@@ -60,6 +71,7 @@ def render(manifest: dict) -> str:
             f" {len(bucket.get('validation_task_ids') or [])} | {share} |"
         )
 
+    labels = stage_labels(manifest)
     lines += [
         "",
         "## 阶段（累积：后一阶段包含前一阶段的全部桶）",
@@ -72,7 +84,7 @@ def render(manifest: dict) -> str:
         train_rows = int(stage.get("train_rows", 0))
         selected = " + ".join(stage.get("buckets") or [])
         lines.append(
-            f"| {STAGE_LABEL.get(name, name)} | {selected} | {train_rows} |"
+            f"| {labels.get(name, name)} | {selected} | {train_rows} |"
             f" {train_rows - previous} | {stage.get('epochs', 1.0)} |"
             f" {stage.get('learning_rate')} |"
         )

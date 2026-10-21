@@ -48,10 +48,13 @@ OUT_DIR="${OUT_DIR:-data/sft_m10r}"
 POOL="${POOL:-data/sft_pure_v4/all.jsonl}"
 LABELS="${LABELS:-data/sft_pure_v4/difficulty_labels.jsonl}"
 EVALUATION="${EVALUATION:-data/evaluation/tasks.jsonl}"
+# 模板轨迹保留条数（1,912 → 约 1,250 的那一刀）与课程分桶口径。
+KEEP_TEMPLATE="${KEEP_TEMPLATE:-700}"
+BUCKET_MODE="${BUCKET_MODE:-behavior}"
 
 mkdir -p "${OUT_DIR}"
 STAGED="${OUT_DIR}/increment_merged.jsonl"
-echo "[0/3] 合并增量并去重（同题只留一条，顺序即优先级）"
+echo "[0/4] 合并增量并去重（同题只留一条，顺序即优先级）"
 "${PY}" scripts/merge_m10r_increments.py \
   --out "${STAGED}" \
   "${INCREMENT_SOURCES[@]}"
@@ -68,7 +71,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "[1/3] 合并与配比（去重后增量 $(wc -l < "${STAGED}") 行）"
+echo "[1/4] 合并与配比（去重后增量 $(wc -l < "${STAGED}") 行）"
 "${PY}" scripts/build_m10r_pool.py \
   --pool "${POOL}" \
   --increment "${INCREMENT}" \
@@ -78,29 +81,41 @@ echo "[1/3] 合并与配比（去重后增量 $(wc -l < "${STAGED}") 行）"
   "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}"
 
 echo
-echo "[2/3] 给新题补离线难度标签"
+echo "[2/4] 给新题补离线难度标签"
 "${PY}" scripts/label_sft_difficulty_offline.py \
   --input "${OUT_DIR}/all.jsonl" \
   --output "${OUT_DIR}/difficulty_labels.jsonl"
 
 echo
-echo "[3/3] 生成课程清单"
-"${PY}" scripts/prepare_sft_curriculum.py \
-  --source "${OUT_DIR}/all.jsonl" \
+echo "[3/4] 砍掉多余的模板轨迹（改配权，不是丢数据）"
+# 1,912 条里 71% 是「搜一次、开第一个、买」。旧课程又把它练 2–3 遍，曝光比到 5:1，
+# 结果只会让模型更确定地「开第一个」，GRPO 需要的组内方差被压没。
+# 探索轨迹一条不动，模板留到 KEEP_TEMPLATE 条。
+CAPPED="${OUT_DIR}/capped"
+"${PY}" scripts/downsample_sft_pool.py \
+  --pool "${OUT_DIR}/all.jsonl" \
   --labels "${OUT_DIR}/difficulty_labels.jsonl" \
-  --evaluation "${EVALUATION}" \
-  --output "${OUT_DIR}/manifest.json"
+  --keep-template "${KEEP_TEMPLATE}" \
+  --out-dir "${CAPPED}"
 
 echo
-# 桶与阶段的分布直接打出来：新采的探索类轨迹几乎全进 strategy 桶，
-# 而 strategy 只在最后阶段才出现——这件事不该靠人记。
-"${PY}" scripts/show_sft_manifest.py "${OUT_DIR}/manifest.json"
+echo "[4/4] 生成课程清单（倒序两段：先探索，后全量）"
+"${PY}" scripts/prepare_sft_curriculum.py \
+  --source "${CAPPED}/all.jsonl" \
+  --labels "${CAPPED}/difficulty_labels.jsonl" \
+  --evaluation "${EVALUATION}" \
+  --bucket-mode "${BUCKET_MODE}" \
+  --output "${CAPPED}/manifest.json"
+
+echo
+# 桶与阶段的分布直接打出来：哪一类数据被练几遍，是这次干预的核心变量。
+"${PY}" scripts/show_sft_manifest.py "${CAPPED}/manifest.json"
 
 echo
 TRAIN_CMD=(
   bash scripts/sft_curriculum.sh
-  --source "${OUT_DIR}/all.jsonl"
-  --manifest "${OUT_DIR}/manifest.json"
+  --source "${CAPPED}/all.jsonl"
+  --manifest "${CAPPED}/manifest.json"
   --output-root outputs/models/sft-m10r
   --loss-scope tool-call-only
 )
@@ -108,13 +123,13 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   echo "训练命令（--dry-run 只打印，不执行）："
   printf '  %q' "${TRAIN_CMD[@]}"; echo
   "${PY}" scripts/run_sft_curriculum.py \
-    --source "${OUT_DIR}/all.jsonl" \
-    --manifest "${OUT_DIR}/manifest.json" \
+    --source "${CAPPED}/all.jsonl" \
+    --manifest "${CAPPED}/manifest.json" \
     --output-root outputs/models/sft-m10r \
     --loss-scope tool-call-only \
     --dry-run
   exit 0
 fi
 
-echo "完成。训练命令（要显卡，M5-B 同款 3 阶段课程 + tool-call-only loss）："
+echo "完成。训练命令（要显卡；倒序两段课程 + tool-call-only loss）："
 printf '  %q' "${TRAIN_CMD[@]}"; echo

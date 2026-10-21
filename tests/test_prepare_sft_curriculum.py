@@ -142,6 +142,54 @@ class PrepareSftCurriculumTests(unittest.TestCase):
 
         self.assertEqual(manifest["counts"]["rows"], 1)
 
+    def test_behavior_mode_buckets_by_action_not_difficulty(self):
+        """倒序课程按「做没做探索」分桶，与难度标签无关。
+
+        2026-10-22：旧的三段按难度分桶，模板被练 3 遍、探索只 1 遍（曝光比 0.19）。
+        新口径要让探索轨迹单独成桶、且在阶段 A 独占。
+        """
+        plain = _row(1)
+        # 换词：同题搜两个不同查询词
+        rewritten = _row(2)
+        rewritten["messages"].insert(
+            5, _call("search_products", {"query": "other item"}, "2-1b")
+        )
+        labels = [_label(1, "hard"), _label(2, "simple")]
+
+        manifest = build_manifest(
+            [plain, rewritten],
+            labels,
+            evaluation_ids=set(),
+            bucket_mode="behavior",
+        )
+
+        self.assertEqual(manifest["bucket_mode"], "behavior")
+        self.assertEqual(manifest["buckets"]["template"]["rows"], 1)
+        self.assertEqual(manifest["buckets"]["exploratory"]["rows"], 1)
+        # 阶段 A 只放探索；阶段 B 才是全量
+        self.assertEqual(manifest["stages"]["a"]["buckets"], ["exploratory"])
+        self.assertEqual(
+            manifest["stages"]["b"]["buckets"], ["exploratory", "template", "other"]
+        )
+        self.assertEqual(list(manifest["stages"]), ["a", "b"])
+
+    def test_behavior_bucket_ignores_difficulty_label(self):
+        """难度标签是 hard 但只搜一次开一个 ⇒ 仍然算模板。"""
+        from scripts.prepare_sft_curriculum import behavior_bucket, behavior_profile
+
+        profile = behavior_profile(_row(1))
+        self.assertFalse(profile["explored"])
+        self.assertEqual(behavior_bucket(profile), "template")
+
+    def test_behavior_bucket_marks_paging_as_exploratory(self):
+        from scripts.prepare_sft_curriculum import behavior_bucket, behavior_profile
+
+        row = _row(1)
+        row["messages"].insert(5, _call("next_page", {}, "1-page"))
+        profile = behavior_profile(row)
+        self.assertTrue(profile["paging"])
+        self.assertEqual(behavior_bucket(profile), "exploratory")
+
 
 if __name__ == "__main__":
     unittest.main()

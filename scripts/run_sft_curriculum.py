@@ -13,7 +13,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGES = ("a", "b", "c")
+# 阶段不再写死 a/b/c：课程清单说了算（2026-10-22 起 M10-R 用两段倒序课程）。
+DEFAULT_STAGES = ("a", "b", "c")
+
+
+def stage_order(manifest) -> list[str]:
+    stages = manifest.get("stages") or {}
+    if not stages:
+        raise ValueError("课程清单里没有 stages")
+    return list(stages.keys())
 
 
 def build_stage_commands(
@@ -24,8 +32,8 @@ def build_stage_commands(
     base_model,
     output_root,
     python,
-    start_stage="a",
-    stop_after_stage="c",
+    start_stage=None,
+    stop_after_stage=None,
     swanlab=False,
     swanlab_project="shopping-grpo-sft-curriculum",
     qlora=False,
@@ -34,19 +42,31 @@ def build_stage_commands(
     loss_scope="assistant",
     max_steps=-1,
 ):
-    start = STAGES.index(start_stage)
-    stop = STAGES.index(stop_after_stage)
+    stages = stage_order(manifest)
+    start_stage = start_stage or stages[0]
+    stop_after_stage = stop_after_stage or stages[-1]
+    for name in (start_stage, stop_after_stage):
+        if name not in stages:
+            raise ValueError(
+                f"阶段 {name!r} 不在课程清单里（可选：{', '.join(stages)}）"
+            )
+    start = stages.index(start_stage)
+    stop = stages.index(stop_after_stage)
     if stop < start:
         raise ValueError("--stop-after-stage must be at or after --start-stage")
 
     commands = []
-    for index, stage in enumerate(STAGES[start : stop + 1]):
+    for index, stage in enumerate(stages[start : stop + 1]):
         stage_config = manifest["stages"][stage]
         stage_root = Path(output_root) / f"stage-{stage}"
         model = (
             base_model
-            if stage == "a"
-            else str(Path(output_root) / f"stage-{STAGES[STAGES.index(stage) - 1]}" / "merged")
+            if index == 0
+            else str(
+                Path(output_root)
+                / f"stage-{stages[stages.index(stage) - 1]}"
+                / "merged"
+            )
         )
         train = [
             str(python),
@@ -116,8 +136,16 @@ def parse_args():
     parser.add_argument(
         "--output-root", type=Path, default=ROOT / "outputs/models/sft-curriculum"
     )
-    parser.add_argument("--start-stage", choices=STAGES, default="a")
-    parser.add_argument("--stop-after-stage", choices=STAGES, default="c")
+    parser.add_argument(
+        "--start-stage",
+        default=None,
+        help="从哪个阶段开始（默认课程清单的第一段；可选值由清单决定）",
+    )
+    parser.add_argument(
+        "--stop-after-stage",
+        default=None,
+        help="到哪个阶段结束（默认课程清单的最后一段）",
+    )
     parser.add_argument(
         "--loss-scope",
         choices=("assistant", "tool-call-only"),
@@ -181,7 +209,8 @@ def main():
         subprocess.run(command["train"], check=True)
         subprocess.run(command["merge"], check=True)
     last_stage = commands[-1]["stage"]
-    label = "最终 GRPO 起点" if last_stage == "c" else "本次最后阶段输出"
+    final_stage = stage_order(manifest)[-1]
+    label = "最终 GRPO 起点" if last_stage == final_stage else "本次最后阶段输出"
     print(f"\n{label}：{args.output_root / f'stage-{last_stage}/merged'}")
 
 
