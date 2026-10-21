@@ -54,6 +54,10 @@ SYSTEM_PROMPT = """你是一个购物 Agent，负责在 ShopSimulator 中替用�
 MAX_BLOCKED_TOOL_CALLS = 3
 MODEL_COMPLETION_RETRIES = 2
 MODEL_RETRY_DELAY_SECONDS = 1
+#: 连续多少条基础设施故障才判定「管道坏了」并中止采集。
+#: 取 1 太脆：M10-R 探针 480 条跑到第 339 条时被**一条**异常中止，剩下 141 条白等。
+#: 取 3 仍能挡住真断线（坏管道下 3 条几乎立刻连着来），但能吞掉偶发 429。
+INFRASTRUCTURE_FAILURE_TOLERANCE = 3
 
 #: OpenCode Go 要求每个对话带稳定会话 ID，缺失直接 400 MissingSessionID。
 #: 想固定（例如为了命中 prompt 缓存）就 export 它，否则每个 client 实例随机。
@@ -233,9 +237,13 @@ class OpenAIChatClient:
                 # 把响应体读出来才能知道原因。M10-R 探针冒烟就卡在这里：
                 # 3/3 条轨迹只有 "HTTP Error 400: Bad Request"，什么都没说明。
                 body = exc.read().decode("utf-8", "replace") if exc.fp else ""
-                if 400 <= exc.code < 500 or attempt >= MODEL_COMPLETION_RETRIES:
+                # 429（限流）与 5xx 是**暂时性**故障：8 并发打同一个端点时很常见，
+                # 立刻抛会把一整批 480 条采集废掉。退避重试；重试仍失败才升级成
+                # ModelRequestError（届时由 _is_infrastructure_failure 中止采集）。
+                retryable = exc.code == 429 or exc.code >= 500
+                if not retryable or attempt >= MODEL_COMPLETION_RETRIES:
                     raise ModelRequestError(exc.code, body) from exc
-                time.sleep(MODEL_RETRY_DELAY_SECONDS * (attempt + 1))
+                time.sleep(MODEL_RETRY_DELAY_SECONDS * (attempt + 1) * 2)
             except (RemoteDisconnected, TimeoutError, URLError):
                 if attempt >= MODEL_COMPLETION_RETRIES:
                     raise
@@ -545,6 +553,7 @@ def collect_tasks(
         raise ValueError("attempts_per_task must be at least 1")
     done = completed_task_attempts(output_path)
     written = []
+    consecutive_failures = 0
     for task in tasks:
         task_id = int(task["task_id"])
         for attempt_index in range(attempts_per_task):
@@ -562,9 +571,15 @@ def collect_tasks(
             append_jsonl(output_path, [trajectory])
             written.append(trajectory)
             if _is_infrastructure_failure(trajectory):
-                raise CollectionInfrastructureError(
-                    "collection infrastructure failure; stopped before the next task"
-                )
+                consecutive_failures += 1
+                if consecutive_failures >= INFRASTRUCTURE_FAILURE_TOLERANCE:
+                    raise CollectionInfrastructureError(
+                        "collection infrastructure failure "
+                        f"({consecutive_failures} in a row); stopped before the next task: "
+                        f"{_infrastructure_detail(trajectory)}"
+                    )
+            else:
+                consecutive_failures = 0
     return written
 
 
@@ -585,6 +600,21 @@ def _is_infrastructure_failure(trajectory):
         error_type == ShopEnvironmentError.__name__
         and "Unable to get available environment resource" in error.get("message", "")
     )
+
+
+def _infrastructure_detail(trajectory) -> str:
+    """把「为什么中止」写进异常消息。
+
+    原来只抛 ``collection infrastructure failure``，看不出是限流、环境还是网络，
+    还得回去翻 raw.jsonl 才知道——中止本身就是要人立刻处理的事，不该再找一遍。
+    """
+    error = trajectory.get("release_error") or trajectory.get("error") or {}
+    error_type = error.get("type") or "unknown"
+    message = str(error.get("message") or "").strip().replace("\n", " ")
+    if len(message) > 200:
+        message = message[:200] + "…"
+    task_id = trajectory.get("task_id")
+    return f"{error_type}: {message} (task {task_id})" if message else f"{error_type} (task {task_id})"
 
 
 def _candidate_hint(reason, min_opened_before_buy, available_candidates, opened_count):

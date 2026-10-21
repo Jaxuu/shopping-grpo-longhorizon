@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import signal
+import sys
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -16,8 +18,10 @@ from shopping_grpo.collection.sft import (
     task_ids_from_jsonl,
 )
 from shopping_grpo.evaluation.rollout import (
+    INFRASTRUCTURE_FAILURE_TOLERANCE,
     CollectionInfrastructureError,
     OpenAIChatClient,
+    _infrastructure_detail,
     _is_infrastructure_failure,
     append_jsonl,
     collect_for_task,
@@ -106,6 +110,22 @@ def _build_candidates(tasks, attempts_per_task, completed):
     ]
 
 
+def _report_progress(done, total, accepted, started) -> None:
+    """采集进度打到 stderr：长跑时 stdout 只在结束时有一行，会让人以为卡死。
+
+    写 stderr 而不是 stdout，是为了不污染 `collected_raw=...` 这行的机器解析。
+    """
+    elapsed = time.monotonic() - started
+    per_item = elapsed / max(done, 1)
+    remaining = per_item * max(total - done, 0)
+    print(
+        f"[progress] {done}/{total} 条 · 已收 {accepted} · "
+        f"已用 {elapsed / 60:.1f} 分钟 · 预计剩余 {remaining / 60:.1f} 分钟",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def collect_until_target(
     *,
     tasks,
@@ -118,6 +138,7 @@ def collect_until_target(
     attempts_per_task,
     workers=1,
     excluded_task_ids=(),
+    progress_every=0,
 ):
     """Collect concurrently without scheduling more possible successes than needed."""
 
@@ -131,6 +152,8 @@ def collect_until_target(
     pending = {}
     written = []
     infrastructure_failed = False
+    consecutive_failures = 0
+    last_failure_detail = ""
 
     def submit_available(executor):
         remaining = int(target_accepted) - accepted
@@ -152,6 +175,17 @@ def collect_until_target(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         submit_available(executor)
+        started = time.monotonic()
+        already_done = len(completed)
+        planned = already_done + len(candidates)
+        finished = 0
+        if progress_every:
+            print(
+                f"[progress] 开跑：计划 {len(candidates)} 条"
+                f"（已有 {already_done} 条会跳过），{workers} 并发",
+                file=sys.stderr,
+                flush=True,
+            )
         while pending:
             completed_futures, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed_futures:
@@ -160,13 +194,31 @@ def collect_until_target(
                 append_jsonl(output_path, [trajectory])
                 written.append(trajectory)
                 accepted += acceptance_reasons(trajectory)[0]
-                infrastructure_failed |= _is_infrastructure_failure(trajectory)
+                # 单条故障不停整批：8 并发打一个端点，偶发 429/断连很正常。
+                # 连续 INFRASTRUCTURE_FAILURE_TOLERANCE 条才认定管道坏了。
+                if _is_infrastructure_failure(trajectory):
+                    consecutive_failures += 1
+                    last_failure_detail = _infrastructure_detail(trajectory)
+                    infrastructure_failed = (
+                        consecutive_failures >= INFRASTRUCTURE_FAILURE_TOLERANCE
+                    )
+                else:
+                    consecutive_failures = 0
+                finished += 1
+                if progress_every and finished % progress_every == 0:
+                    _report_progress(
+                        already_done + finished, planned, accepted, started
+                    )
             if not infrastructure_failed:
                 submit_available(executor)
+        if progress_every:
+            _report_progress(already_done + finished, planned, accepted, started)
 
     if infrastructure_failed:
         raise CollectionInfrastructureError(
-            "collection infrastructure failure; stopped before the next task"
+            "collection infrastructure failure "
+            f"({consecutive_failures} in a row); stopped before the next task: "
+            f"{last_failure_detail}"
         )
     return written, accepted
 
@@ -303,6 +355,7 @@ def main() -> int:
                     attempts_per_task=args.attempts_per_task,
                     workers=args.workers,
                     excluded_task_ids=held_out_ids,
+                    progress_every=20,
                 )
                 print(f"collected_raw={len(written)} accepted_total={accepted}")
         except CollectionInfrastructureError as exc:

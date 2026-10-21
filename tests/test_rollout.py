@@ -494,14 +494,18 @@ class RolloutTest(unittest.TestCase):
         )
 
     def test_collect_tasks_stops_after_a_release_failure(self):
-        """环境租约未释放时，不能继续消耗后续 task。"""
+        """环境租约连续释放失败时，不能继续消耗后续 task。
+
+        容忍度见 ``INFRASTRUCTURE_FAILURE_TOLERANCE``：单条故障不停（8 并发下偶发
+        断连/429 很常见），连续 3 条才认定管道坏了。
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "raw.jsonl"
             client = MockClient([{"role": "assistant", "content": "stop"}])
 
             with self.assertRaises(CollectionInfrastructureError):
                 collect_tasks(
-                    [{"task_id": 1}, {"task_id": 2}],
+                    [{"task_id": index} for index in range(1, 5)],
                     client=client,
                     output_path=output,
                     base_url="http://shop.test",
@@ -510,7 +514,7 @@ class RolloutTest(unittest.TestCase):
 
             rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
-        self.assertEqual([row["task_id"] for row in rows], [1])
+        self.assertEqual([row["task_id"] for row in rows], [1, 2, 3])
         self.assertEqual(rows[0]["status"], "environment_release_failed")
         self.assertEqual(rows[0]["release_error"]["type"], "OSError")
 
@@ -522,7 +526,7 @@ class RolloutTest(unittest.TestCase):
 
             with self.assertRaises(CollectionInfrastructureError):
                 collect_tasks(
-                    [{"task_id": 1}, {"task_id": 2}],
+                    [{"task_id": index} for index in range(1, 5)],
                     client=client,
                     output_path=output,
                     base_url="http://shop.test",
@@ -531,7 +535,7 @@ class RolloutTest(unittest.TestCase):
 
             rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
-        self.assertEqual([row["task_id"] for row in rows], [1])
+        self.assertEqual([row["task_id"] for row in rows], [1, 2, 3])
         self.assertEqual(rows[0]["error"]["type"], "ShopEnvironmentError")
 
     def test_collect_tasks_stops_after_model_api_is_unreachable(self):
@@ -545,7 +549,7 @@ class RolloutTest(unittest.TestCase):
 
             with self.assertRaises(CollectionInfrastructureError):
                 collect_tasks(
-                    [{"task_id": 1}, {"task_id": 2}],
+                    [{"task_id": index} for index in range(1, 5)],
                     client=DisconnectedClient(),
                     output_path=output,
                     base_url="http://shop.test",
@@ -554,7 +558,7 @@ class RolloutTest(unittest.TestCase):
 
             rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
-        self.assertEqual([row["task_id"] for row in rows], [1])
+        self.assertEqual([row["task_id"] for row in rows], [1, 2, 3])
         self.assertEqual(rows[0]["error"]["type"], "URLError")
 
     def test_collect_for_task_serializes_multiple_tool_calls_before_execution(self):

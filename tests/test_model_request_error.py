@@ -8,9 +8,11 @@ M10-R 探针冒烟 3/3 条轨迹都是 ``HTTPError 400: Bad Request``，`urllib`
 
 三条不变量：
 
-1. 4xx 立刻抛 ``ModelRequestError``，**不重试**（请求本身错了，重试只是浪费）。
-2. 异常消息里必须含响应体原文。
-3. ``_is_infrastructure_failure`` 认它 ⇒ 采集器立刻停，不会烧完整个批次。
+1. 4xx（429 除外）立刻抛 ``ModelRequestError``，**不重试**（请求本身错了，重试只是浪费）。
+2. 429 与 5xx 是暂时性故障，**退避重试**；用尽后仍抛 ``ModelRequestError``。
+3. 异常消息里必须含响应体原文。
+4. ``_is_infrastructure_failure`` 认它 ⇒ 采集器停（但连续 3 条才停，见
+   ``test_infrastructure_tolerance.py``）。
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import io
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,18 +83,51 @@ class ModelRequestErrorTest(unittest.TestCase):
             make_client(transport).complete(MESSAGES, TOOLS)
         self.assertEqual(len(calls), 1, "4xx 重试没有意义，必须只请求一次")
 
-    def test_429_also_raises_immediately(self):
+    def test_429_is_retried_then_raises(self):
+        """429 是限流，属暂时性故障：8 并发打一个端点时很常见，不能一次就废掉整批。"""
         calls = []
 
         def transport(url, payload, headers, timeout):
             calls.append(1)
             raise http_error(429, b'{"error":"rate limit"}')
 
-        with self.assertRaises(ModelRequestError) as ctx:
-            make_client(transport).complete(MESSAGES, TOOLS)
+        with mock.patch("shopping_grpo.evaluation.rollout.time.sleep"):
+            with self.assertRaises(ModelRequestError) as ctx:
+                make_client(transport).complete(MESSAGES, TOOLS)
         self.assertEqual(ctx.exception.status, 429)
         self.assertIn("rate limit", str(ctx.exception))
-        self.assertEqual(len(calls), 1)
+        self.assertGreater(len(calls), 1, "429 必须退避重试")
+
+    def test_429_then_success_recovers(self):
+        """重试一次就成功时，不能让整条轨迹变成异常。"""
+        calls = []
+
+        def transport(url, payload, headers, timeout):
+            calls.append(1)
+            if len(calls) == 1:
+                raise http_error(429, b'{"error":"rate limit"}')
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "search_products", "arguments": '{"query":"x"}'},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+
+        with mock.patch("shopping_grpo.evaluation.rollout.time.sleep"):
+            message = make_client(transport).complete(MESSAGES, TOOLS)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(message.get("tool_calls"))
 
     def test_empty_body_does_not_crash(self):
         def transport(url, payload, headers, timeout):
