@@ -419,11 +419,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"  其中「开≥2 且名次≥2」的对照样本：{report['comparison_rows']} 条")
     print(
+        f"  换词示范：{report['requery_rows']} 条"
+        f"（新增贡献 {report['requery_rows_in_increment']} 条）；"
+        f"任意探索动作：{report['exploratory_rows']} 条"
+        f"（新增 {report['exploratory_rows_in_increment']} 条）"
+    )
+    print(
         f"  翻页示范：{report['paging_rows']} 条"
         f"（新增贡献 {report['paging_rows_in_increment']} 条）；"
         f"gold 在第 21 名以后：{report['beyond_first_page_rows']} 条"
     )
     print("  名次分布：" + "，".join(f"{k} {v}" for k, v in report["rank_distribution"].items()))
+    # 名次口径是「老师自己看到过的**最好**名次」，所以换词成功的轨迹 gold 会冒到第 1 名。
+    # 这个占比降不下去不代表干预失败；想压它要用 --target-share 丢 rank-1 行，
+    # 而那正好会丢掉「换词把 gold 顶上来」的样本 —— 别拿它当 M10-R 的验收指标。
     print(f"  平均步数 {report['mean_steps']:.1f}")
     print(f"  待标注难度标签：{len(pending_labels)} 条")
     print(f"写入 {portable(pool_out)}；报告 {portable(args.out_dir / 'build_report.json')}")
