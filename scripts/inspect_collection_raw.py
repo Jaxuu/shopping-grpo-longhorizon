@@ -51,7 +51,9 @@ def needs_purge(row: dict) -> bool:
     return bool(row.get("error") or row.get("release_error"))
 
 
-def inspect(rows: list[dict], targets: list[int] | None = None) -> dict:
+def inspect(
+    rows: list[dict], targets: list[int] | None = None, attempts: int | None = None
+) -> dict:
     statuses = collections.Counter(str(row.get("status")) for row in rows)
     keys = collections.Counter(
         (row.get("task_id"), row.get("attempt_index")) for row in rows
@@ -61,7 +63,7 @@ def inspect(rows: list[dict], targets: list[int] | None = None) -> dict:
         if not needs_purge(row):
             per_task[row.get("task_id")].add(row.get("attempt_index"))
 
-    attempts = [idx for idxs in per_task.values() for idx in idxs]
+    attempts_seen = [idx for idxs in per_task.values() for idx in idxs]
     report = {
         "rows": len(rows),
         "statuses": dict(sorted(statuses.items(), key=lambda kv: -kv[1])),
@@ -69,8 +71,8 @@ def inspect(rows: list[dict], targets: list[int] | None = None) -> dict:
         "terminal": sum(1 for row in rows if str(row.get("status")) in TERMINAL_STATUSES),
         "duplicate_keys": sum(count - 1 for count in keys.values() if count > 1),
         "tasks": len(per_task),
-        "attempts_per_task": (len(attempts) / len(per_task)) if per_task else 0.0,
-        "max_attempt_index": max(attempts) if attempts else -1,
+        "attempts_per_task": (len(attempts_seen) / len(per_task)) if per_task else 0.0,
+        "max_attempt_index": max(attempts_seen) if attempts_seen else -1,
     }
     if targets:
         target_set = set(targets)
@@ -78,8 +80,9 @@ def inspect(rows: list[dict], targets: list[int] | None = None) -> dict:
         report["targets"] = len(target_set)
         report["targets_done"] = len(done)
         report["targets_pending"] = len(target_set) - len(done)
-        # 剩余条数按「每题计划次数」估，不用均值——断点时均值会偏小。
-        planned = report["max_attempt_index"] + 1
+        # 计划次数必须由调用方给（命令行 --attempts）。靠观测到的最大 attempt_index
+        # 反推是错的：整批都只跑到第 2 次就断了，会算出「计划 3 次、已补齐」。
+        planned = attempts if attempts else report["max_attempt_index"] + 1
         report["planned_attempts"] = planned
         report["remaining"] = sum(
             max(0, planned - len(per_task[task])) for task in target_set if task in per_task
@@ -140,6 +143,12 @@ def main() -> int:
         default=None,
         help="本批清单（jsonl，含 task_id），用来算「还剩多少条」",
     )
+    parser.add_argument(
+        "--attempts",
+        type=int,
+        default=None,
+        help="每题计划跑几次（不给就按观测到的最大 attempt_index+1 猜，可能偏低）",
+    )
     args = parser.parse_args()
 
     if not args.raw.exists():
@@ -151,7 +160,7 @@ def main() -> int:
         print(f"{args.raw} 里没有可解析的行——这批没采到任何东西。", file=sys.stderr)
         return 1
     targets = task_ids_from(args.targets) if args.targets else None
-    report = inspect(rows, targets)
+    report = inspect(rows, targets, args.attempts)
     print(render(args.raw, report, broken))
     return 0
 

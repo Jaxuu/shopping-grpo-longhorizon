@@ -72,6 +72,23 @@ class InspectTest(unittest.TestCase):
             # 题 2 差 2 条 + 题 3 整题 3 条
             self.assertEqual(report["remaining"], 5)
 
+    def test_planned_attempts_must_come_from_caller(self):
+        """整批都只跑到第 2 次就断，靠 max_attempt_index 反推会算出「已补齐」。
+
+        2026-10-22：requery 批 386 条覆盖 120 题、每题 3.2 次，观测最大
+        attempt_index=3 恰好等于计划次数，侥幸算对；换个断点位置就错。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [row(1, 0), row(1, 1), row(2, 0), row(2, 1)])
+            rows, _ = module.read_rows(path)
+            targets = [1, 2]
+            guessed = module.inspect(rows, targets)
+            self.assertEqual(guessed["planned_attempts"], 2)
+            self.assertEqual(guessed["remaining"], 0)
+            explicit = module.inspect(rows, targets, attempts=4)
+            self.assertEqual(explicit["planned_attempts"], 4)
+            self.assertEqual(explicit["remaining"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

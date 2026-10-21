@@ -208,7 +208,16 @@ case "${MODE}" in
       echo "还没有任何轨迹：${OUT_DIR}/raw.jsonl 不存在。" >&2
       exit 1
     fi
-    "${PY}" scripts/inspect_collection_raw.py "${OUT_DIR}/raw.jsonl" --targets "${TARGETS}"
+    mkdir -p "${OUT_DIR}"
+    # 必须对照「本批待采清单」而不是全量清单：探针已采过的题不在本批里，
+    # 拿全量清单比会把它们算成「未开始」，把剩余量吹大一倍（2026-10-22 实测：
+    # 报 254 条，实际 94 条）。
+    pending="${OUT_DIR}/pending_targets.jsonl"
+    pending_targets "${pending}"
+    "${PY}" scripts/inspect_collection_raw.py "${OUT_DIR}/raw.jsonl" \
+      --targets "${pending}" --attempts "${ATTEMPTS}"
+    echo
+    echo "[提示] 本批全量清单 ${TARGETS}（含探针已采的题）；上面只算本批还要补多少。"
     ;;
   *)
     echo "未知模式：${MODE}（可选 all / collect / select / status）" >&2
