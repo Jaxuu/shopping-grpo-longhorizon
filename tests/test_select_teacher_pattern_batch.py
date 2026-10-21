@@ -212,6 +212,25 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(len(chosen), 1)
         self.assertEqual(report["action"], "multi_open")
 
+    def test_gold_but_not_accepted_is_counted_separately(self):
+        """买对 gold ≠ 能进池子。
+
+        2026-10-21 实测：翻页题 160 条里 52 条 `target_asin_match=True`，
+        但只有 39 条过 `acceptance_reasons`（选项没选全的 reward_type 不是
+        `gold_purchase`）。不分开计就会把 52 当 39 用，高估能收多少条。
+        """
+        row = raw_trajectory(1, queries=["差查询", "好查询"], opens=[GOLD])
+        row["terminal_result"]["reward_detail"]["reward_type"] = (
+            "gold_purchase_missing_option"
+        )
+        chosen, report = module.select(rows=[row], scenario="requery")
+        self.assertEqual(chosen, [])
+        self.assertEqual(report["counts"]["rejected_not_accepted"], 1)
+        self.assertEqual(report["counts"]["rejected_not_accepted_but_gold"], 1)
+        self.assertEqual(
+            report["reject_reason_counts"], {"reward_v3_not_gold_purchase": 1}
+        )
+
     def test_action_override_decouples_source_scenario_from_action(self):
         """翻页题里「换词找到」的轨迹：默认口径（翻页）会丢，覆盖后能收。
 

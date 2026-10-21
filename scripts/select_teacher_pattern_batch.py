@@ -134,6 +134,7 @@ def select(
             "skipped_not_in_targets": 0,
             "skipped_excluded": 0,
             "rejected_not_accepted": 0,
+            "rejected_not_accepted_but_gold": 0,
             "rejected_no_target_action": 0,
             "rejected_too_long": 0,
             "tasks_with_candidates": 0,
@@ -142,6 +143,7 @@ def select(
         }
     )
     rejections: list[dict] = []
+    reason_counter: collections.Counter = collections.Counter()
     eligible: dict[int, list[dict]] = collections.defaultdict(list)
 
     for row in rows:
@@ -157,6 +159,12 @@ def select(
         summary = extract_trajectory(row)
         if not summary["accepted"]:
             stats["rejected_not_accepted"] += 1
+            if summary["bought_gold"]:
+                # 「买到 gold」和「能进池子」不是一回事：`acceptance_reasons` 还要求
+                # 选项选全、没超预算、终止原因对。不分开计就会把 52 当成 39 用。
+                stats["rejected_not_accepted_but_gold"] += 1
+            for reason in summary["reject_reasons"]:
+                reason_counter[str(reason)] += 1
             rejections.append(
                 {
                     "task_id": task_id,
@@ -201,6 +209,7 @@ def select(
         "action": action,
         "action_override": action_override,
         "counts": dict(sorted(stats.items())),
+        "reject_reason_counts": dict(reason_counter.most_common()),
         "rejections": rejections,
     }
     return chosen, report
@@ -329,6 +338,16 @@ def main(argv=None) -> int:
     )
     if dropped:
         print(f"  ⚠️ {len(dropped)} 条过不了课程校验，已丢弃（见 selection_report.json）")
+    lost_gold = counts.get("rejected_not_accepted_but_gold", 0)
+    if lost_gold:
+        print(
+            f"  ⚠️ 另有 {lost_gold} 条**买对了 gold 但没过验收**"
+            "（选项没选全 / 超预算 / 终止原因不符），进不了池子"
+        )
+    reasons = report.get("reject_reason_counts") or {}
+    if reasons:
+        top = "、".join(f"{name} {count}" for name, count in list(reasons.items())[:5])
+        print(f"  验收未过的原因（一条可计多项）：{top}")
     print(f"  → {args.out_dir / 'kept.jsonl'}")
     print(f"  名次画像：{report['profile']['rank_buckets']}（第 1 名 {report['profile']['rank_1']} 条）")
     return 0
