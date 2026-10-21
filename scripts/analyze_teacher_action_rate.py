@@ -465,7 +465,7 @@ def main(argv=None) -> int:
         print()
         print(
             "**判定作废**：异常太多，命中率不能解释成「老师不做」。"
-            "先跑 `bash scripts/run_m10_teacher_probe.sh smoke` 定位异常。"
+            "先跑 `bash scripts/run_m10_teacher_probe.sh api` 看老师 API 到底返回什么。"
         )
     if pool_baseline:
         total = pool_baseline["trajectories"]

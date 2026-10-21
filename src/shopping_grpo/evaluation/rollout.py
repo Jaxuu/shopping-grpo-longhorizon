@@ -10,7 +10,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from http.client import RemoteDisconnected
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -210,6 +210,15 @@ class OpenAIChatClient:
                     with urlopen(request, timeout=self.timeout) as raw:
                         response = json.loads(raw.read().decode("utf-8"))
                 return _response_message(response, responses_api=self.responses_api)
+            except HTTPError as exc:
+                # 4xx 是**请求本身**的问题（温度越界 / 字段不支持 / 模型名错），
+                # 重试没有意义，而且 urllib 的 str(exc) 只有 "HTTP Error 400"，
+                # 把响应体读出来才能知道原因。M10-R 探针冒烟就卡在这里：
+                # 3/3 条轨迹只有 "HTTP Error 400: Bad Request"，什么都没说明。
+                body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+                if 400 <= exc.code < 500 or attempt >= MODEL_COMPLETION_RETRIES:
+                    raise ModelRequestError(exc.code, body) from exc
+                time.sleep(MODEL_RETRY_DELAY_SECONDS * (attempt + 1))
             except (RemoteDisconnected, TimeoutError, URLError):
                 if attempt >= MODEL_COMPLETION_RETRIES:
                     raise
@@ -240,6 +249,22 @@ class ToolExecutionError(RuntimeError):
 
 class CollectionInfrastructureError(RuntimeError):
     """环境租约未恢复时，阻止采集器继续污染后续任务。"""
+
+
+class ModelRequestError(RuntimeError):
+    """老师模型返回 4xx：请求本身有问题，重试无用。
+
+    ``urllib.error.HTTPError`` 的字符串只有 ``HTTP Error 400: Bad Request``，
+    真正的原因在**响应体**里（"temperature must be <= 1" / "model not found" /
+    "insufficient quota"）。所以这里把状态码和响应体一起带出来，让它落到
+    ``trajectory["error"]["message"]`` 上——否则一次 480 条的采集只能看到
+    「400」，分不清是参数写错还是额度用光。
+    """
+
+    def __init__(self, status: int, body: str):
+        self.status = int(status)
+        self.body = str(body or "")
+        super().__init__(f"HTTP {self.status} from model API: {self.body[:500]}")
 
 
 def load_tasks(path):
@@ -533,6 +558,9 @@ def _is_infrastructure_failure(trajectory):
     error = trajectory.get("error") or {}
     error_type = error.get("type")
     if error_type in {URLError.__name__, RemoteDisconnected.__name__, TimeoutError.__name__}:
+        return True
+    # 老师模型 4xx：请求本身有问题，后面每一条都会同样失败 ⇒ 立刻停，别烧完整个批次。
+    if error_type == ModelRequestError.__name__:
         return True
     if error_type == ShopHttpError.__name__:
         return True

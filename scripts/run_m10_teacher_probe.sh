@@ -17,6 +17,7 @@
 # 用法
 # ----
 #   bash scripts/run_m10_teacher_probe.sh            # 抽样 → 采集 → 判定
+#   bash scripts/run_m10_teacher_probe.sh api        # 老师 API 参数体检（几十秒，不碰环境）
 #   bash scripts/run_m10_teacher_probe.sh smoke      # 每场景 1 题试跑（验温度参数）
 #   bash scripts/run_m10_teacher_probe.sh targets    # 只抽样（纯 CPU）
 #   bash scripts/run_m10_teacher_probe.sh collect    # 只采集（可反复跑，自动续跑）
@@ -115,6 +116,12 @@ smoke() {
     "${tmp}/raw.jsonl" \
     --targets "${tmp}/targets.jsonl" \
     --detail
+
+  if grep -q '"error"' "${tmp}/raw.jsonl" 2>/dev/null; then
+    echo
+    echo "[smoke] ⚠️ 有轨迹带异常。下一步不是跑全量，是先看 API 到底返回什么："
+    echo "  bash scripts/run_m10_teacher_probe.sh api"
+  fi
 }
 
 collect() {
@@ -162,8 +169,13 @@ case "${MODE}" in
   collect) collect ;;
   analyze) analyze ;;
   smoke)   smoke ;;
+  api)
+    # 只打 API：不带环境、不采集，几十秒。冒烟报 400 时先跑这个。
+    check_teacher
+    "${PY}" scripts/probe_teacher_api.py --model "${MODEL}"
+    ;;
   *)
-    echo "未知模式：${MODE}（可选 all / targets / collect / analyze / smoke）" >&2
+    echo "未知模式：${MODE}（可选 all / targets / collect / analyze / smoke / api）" >&2
     exit 2
     ;;
 esac
