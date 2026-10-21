@@ -55,6 +55,10 @@ MAX_BLOCKED_TOOL_CALLS = 3
 MODEL_COMPLETION_RETRIES = 2
 MODEL_RETRY_DELAY_SECONDS = 1
 
+#: OpenCode Go 要求每个对话带稳定会话 ID，缺失直接 400 MissingSessionID。
+#: 想固定（例如为了命中 prompt 缓存）就 export 它，否则每个 client 实例随机。
+SESSION_ID_ENV = "OPENAI_SESSION_ID"
+
 
 def rollout_interrupted(signum, frame):
     """将终止信号转为 KeyboardInterrupt，使 collect_for_task 的 finally 释放环境。"""
@@ -83,6 +87,7 @@ class OpenAIChatClient:
         token_counter=None,
         observation_token_counter=None,
         transport=None,
+        session_id=None,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -133,6 +138,14 @@ class OpenAIChatClient:
         self.last_context_event = None
         self.last_context_tokens = None
         self.transport = transport
+        # 会话 ID 的优先级：显式传入 > 环境变量 > 每实例随机。
+        # 环境变量 OPENAI_SESSION_ID 用于「想固定路由/缓存」的场景；
+        # 默认随机是安全的：只要同一实例内稳定即可，服务端只要求按对话区分。
+        self.session_id = (
+            str(session_id)
+            if session_id
+            else (os.environ.get(SESSION_ID_ENV) or uuid4().hex)
+        )
 
     def complete(self, messages, tools):
         """请求模型下一轮回复，并在上下文超限时按配置压缩历史。"""
@@ -194,6 +207,10 @@ class OpenAIChatClient:
             "Authorization": f"Bearer {self.api_key}",
             # 避免 Cloudflare 将 Python urllib 默认客户端识别为自动化流量。
             "User-Agent": "shopping-grpo-longhorizon/0.1",
+            # OpenCode Go 自 2026-10-21 起硬性要求每个对话带稳定会话 ID，
+            # 缺失时直接 400 MissingSessionID（见 probe_teacher_api.py 的实测）。
+            # 一个 client 实例 = 一条轨迹 = 一个对话，所以 ID 挂在实例上。
+            "x-opencode-session": self.session_id,
         }
         url = self.base_url if self.responses_api else f"{self.base_url}/chat/completions"
         for attempt in range(MODEL_COMPLETION_RETRIES + 1):
@@ -800,6 +817,7 @@ def client_from_env(
     observation_detail_token_budget=4096,
     observation_generic_token_budget=768,
     observation_search_top_k=20,
+    session_id=None,
 ):
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -821,4 +839,5 @@ def client_from_env(
         observation_detail_token_budget=observation_detail_token_budget,
         observation_generic_token_budget=observation_generic_token_budget,
         observation_search_top_k=observation_search_top_k,
+        session_id=session_id,
     )

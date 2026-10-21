@@ -25,6 +25,9 @@ M10-R 探针冒烟 3/3 条轨迹 `HTTPError 400: Bad Request`，但 `urllib` 抛
 判读
 ----
 * 只有带 ``temperature>0`` 的变体 400 ⇒ 服务端不认这个温度，改用被接受的档位。
+* 所有变体都 400 且响应体是 ``MissingSessionID`` ⇒ 缺 ``x-opencode-session`` 请求头。
+  这是 2026-10-21 实测到的真因（和温度毫无关系）：OpenCode Go 要求每个对话带稳定
+  会话 ID，缺失直接 400。客户端已在 ``OpenAIChatClient`` 里默认发送。
 * 所有变体都 400 ⇒ 不是参数问题，看响应体（多半是模型名 / 额度 / 鉴权）。
 * 全部 200 ⇒ API 侧没问题，异常在采集链路里（环境或工具调用转换）。
 """
@@ -37,6 +40,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import uuid
 
 #: 要试的温度档位。0.0 是历史采集用的档位（Step 2 在它下面跑通过）。
 DEFAULT_TEMPERATURES = (0.0, 0.7, 0.9, 1.0)
@@ -76,16 +80,20 @@ def build_payload(model: str, temperature: float | None, *, thinking: bool) -> d
     return payload
 
 
-def post(url: str, payload: dict, api_key: str, timeout: int) -> tuple[int, str]:
+def post(url: str, payload: dict, api_key: str, timeout: int, *, session_id: str = "") -> tuple[int, str]:
     """返回 (状态码, 响应体)。4xx/5xx 也读响应体——那才是原因所在。"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "shopping-grpo-longhorizon/0.1",
+    }
+    # OpenCode Go 硬性要求：缺这个头直接 400 MissingSessionID。
+    if session_id:
+        headers["x-opencode-session"] = session_id
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": "shopping-grpo-longhorizon/0.1",
-        },
+        headers=headers,
         method="POST",
     )
     try:
@@ -128,6 +136,16 @@ def main(argv=None) -> int:
         action="store_true",
         help="额外测一次「不带 thinking 字段」",
     )
+    parser.add_argument(
+        "--session-id",
+        default=os.environ.get("OPENAI_SESSION_ID", ""),
+        help="x-opencode-session 的值；默认取 OPENAI_SESSION_ID，再退随机 uuid",
+    )
+    parser.add_argument(
+        "--without-session",
+        action="store_true",
+        help="额外测一次「不带 x-opencode-session」，用来确认它是不是必要条件",
+    )
     args = parser.parse_args(argv)
 
     if not args.base_url:
@@ -141,24 +159,34 @@ def main(argv=None) -> int:
     temperatures = tuple(args.temperatures or DEFAULT_TEMPERATURES)
     # deepseek-v4 系列默认开 thinking，必须显式关掉，否则不返回 tool_calls。
     thinking = args.model.casefold().startswith("deepseek-v4")
+    session_id = args.session_id or uuid.uuid4().hex
 
-    variants: list[tuple[str, float | None, bool]] = [
-        (f"temperature={value}", value, thinking) for value in temperatures
+    variants: list[tuple[str, float | None, bool, str]] = [
+        (f"temperature={value}", value, thinking, session_id) for value in temperatures
     ]
-    variants.append(("不带 temperature 字段", None, thinking))
+    variants.append(("不带 temperature 字段", None, thinking, session_id))
     if args.no_thinking_field:
-        variants.append((f"temperature={temperatures[-1]} 且不带 thinking", temperatures[-1], False))
+        variants.append(
+            (f"temperature={temperatures[-1]} 且不带 thinking", temperatures[-1], False, session_id)
+        )
+    if args.without_session:
+        variants.append(
+            ("带温度但不带 x-opencode-session", temperatures[-1], thinking, "")
+        )
 
-    print(f"endpoint : {url}")
-    print(f"model    : {args.model}")
+    print(f"endpoint   : {url}")
+    print(f"model      : {args.model}")
+    print(f"session id : {session_id}（请求头 x-opencode-session）")
     print()
     print("| 变体 | 状态码 | 响应体（前 300 字） |")
     print("|---|---|---|")
 
     failures = 0
-    for label, temperature, with_thinking in variants:
+    for label, temperature, with_thinking, variant_session in variants:
         payload = build_payload(args.model, temperature, thinking=with_thinking)
-        status, body = post(url, payload, args.api_key, args.timeout)
+        status, body = post(
+            url, payload, args.api_key, args.timeout, session_id=variant_session
+        )
         if status != 200:
             failures += 1
         print(f"| {label} | {status} | {excerpt(body).replace('|', chr(92) + '|')} |")
