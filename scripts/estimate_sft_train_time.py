@@ -41,8 +41,11 @@ from scripts.prepare_sft_curriculum import (  # noqa: E402
     _bucket,
 )
 
-# M5 实测（48 GB 卡，bf16 + LoRA r16 + 梯度检查点 + sdpa + liger）
-CALIBRATION = [(6963, 50.2), (7793, 56.2), (9371, 72.0)]
+# 实测点。前三行是 M5 在同类 48 GB 卡上的标定（plans/m5-linux-sft-checklist.md §1.1、
+# plans/m5-sft-ab-runbook.md §3.6）；第四行是 M10-R stage A 在 2026-10-23 00:43 的实测
+# （16 步 / 31:53 = 119.6 s/step，平均字符 18,726），用来把外推锚回真实速度——
+# 只用 M5 三点时它把 A 段高估到 158 s/step，实际是 120。
+CALIBRATION = [(6963, 50.2), (7793, 56.2), (9371, 72.0), (18726, 119.6)]
 EFFECTIVE_BATCH = 8  # per_device_train_batch_size=1 × gradient_accumulation_steps=8
 
 
@@ -200,7 +203,9 @@ def main():
     for stage, config, members, total_rows, avg in stages:
         steps = math.ceil(total_rows / EFFECTIVE_BATCH)
         timings = predict(avg, linear, power)
-        low, high = timings["proportional"], timings["power"]
+        # 三个模型给三条线，取最小/最大作为区间——加了实测点之后幂律可能低于比例模型，
+        # 所以不能假定 proportional 一定是下界。
+        low, high = min(timings.values()), max(timings.values())
         hours = steps * (low + high) / 2 / 3600
         total_hours += hours
         print(
@@ -209,8 +214,15 @@ def main():
         )
     print()
     print(f"合计（不含加载/分词/合并）：约 {total_hours:.1f} 小时")
-    print(f"区间下界 {sum(math.ceil(s[3] / EFFECTIVE_BATCH) * predict(s[4], linear, power)['proportional'] for s in stages) / 3600:.1f} 小时，"
-          f"上界 {sum(math.ceil(s[3] / EFFECTIVE_BATCH) * predict(s[4], linear, power)['power'] for s in stages) / 3600:.1f} 小时")
+    lo = sum(
+        math.ceil(s[3] / EFFECTIVE_BATCH) * min(predict(s[4], linear, power).values())
+        for s in stages
+    ) / 3600
+    hi = sum(
+        math.ceil(s[3] / EFFECTIVE_BATCH) * max(predict(s[4], linear, power).values())
+        for s in stages
+    ) / 3600
+    print(f"区间 {lo:.1f}–{hi:.1f} 小时")
 
     if args.json:
         print(json.dumps({"stages": [(s[0], s[3], s[4]) for s in stages]}, ensure_ascii=False))
