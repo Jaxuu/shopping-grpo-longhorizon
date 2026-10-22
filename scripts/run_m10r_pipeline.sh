@@ -21,6 +21,7 @@
 #   LABEL=m10r-final200    评测输出目录名
 #   MODEL=...              评测权重（默认 outputs/models/sft-m10r/stage-b/merged）
 #   SAVE_STEPS=25          训练每 25 步存一次 checkpoint（定时关机时的中断粒度）
+#   AUTO_EVAL=1            训练成功后自动接着跑 Final-200（无人值守用这个）
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -165,6 +166,12 @@ step_train() {
   local extra=""
   [[ "${start}" != "a" ]] && extra="--start-stage ${start}"
   [[ -n "${resume}" ]] && extra="${extra} --resume-from-checkpoint '${resume}'"
+  # AUTO_EVAL=1：训练跑完接着起评测。串在同一个 tmux 里用 &&，训练失败就不会去测
+  # 一个半成品权重（那样只会浪费时间，还会让人误判成模型变差）。
+  local chain=""
+  if [[ "${AUTO_EVAL:-0}" == "1" ]]; then
+    chain=" && bash scripts/run_m10r_pipeline.sh eval"
+  fi
   # expandable_segments 是历史踩坑的固定配置（碎片回收过 4.4 GiB），别省。
   launch m10r-train \
     "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -173,15 +180,59 @@ step_train() {
        --manifest '${CAPPED}/manifest.json' \
        --output-root '${MODEL_DIR}' \
        --loss-scope tool-call-only \
-       --save-steps ${SAVE_STEPS} ${extra}"
+       --save-steps ${SAVE_STEPS} ${extra}${chain}"
   echo "[提示] A 段约 1.5 小时、B 段约 2.5 小时。进度：bash scripts/run_m10r_pipeline.sh status"
   echo "      被关机打断后再执行一次本命令即续跑（已完成的阶段会跳过）。"
+  if [[ "${AUTO_EVAL:-0}" == "1" ]]; then
+    echo "      训练成功后自动起评测（会话 m10r-eval，日志 outputs/logs/m10r-eval.log）。"
+  fi
 }
 
 # ---------------------------------------------------------------- eval
+# 训练刚结束时显存要过一会儿才真正释放；vLLM 抢不到会直接 OOM 退出。
+wait_gpu_free() {
+  local waited=0 used=""
+  while (( waited < 180 )); do
+    used="$(gpu_used_mib)"
+    if [[ -z "${used}" ]] || (( used < 2000 )); then
+      echo "[ok] 显存已释放（${used:-?} MiB）"
+      return 0
+    fi
+    sleep 10
+    waited=$(( waited + 10 ))
+  done
+  echo "显卡还被占 ${used} MiB（等了 180 s）。nvidia-smi 看是谁没退干净。" >&2
+  return 1
+}
+
+# run_eval_m9.sh 遇到已存在的 [vllm] 会话会「跳过启动」，于是拿旧权重测新模型——
+# 这种错不报错、只出错误分数，是最贵的一类 bug。这里先比对命令行里的权重路径。
+preflight_eval() {
+  [[ -f "${MODEL}/config.json" ]] || {
+    echo "找不到权重：${MODEL}/config.json（训练没跑完？或换 MODEL=...）" >&2
+    return 1
+  }
+  if tmux has-session -t vllm 2>/dev/null; then
+    local running
+    running="$(ps -eo args 2>/dev/null | grep -F 'vllm' | grep -F ' serve ' | head -1)"
+    if [[ -n "${running}" && "${running}" != *"${MODEL}"* ]]; then
+      cat >&2 <<EOF
+已有 [vllm] 会话在服务**别的**权重，评测会静默测错模型：
+  正在服务：${running}
+  本次要测：${MODEL}
+先换掉它：tmux kill-session -t vllm
+EOF
+      return 1
+    fi
+    echo "[ok] 已有 vLLM 在服务本次权重，跳过显存等待"
+    return 0
+  fi
+  wait_gpu_free
+}
+
 step_eval() {
   if [[ "${PIPELINE_DRY:-0}" != "1" ]]; then
-    [[ -f "${MODEL}/config.json" ]] || die "找不到权重：${MODEL}/config.json（训练没跑完？或换 MODEL=...）"
+    preflight_eval || die "评测前置检查没过，见上面的提示"
   fi
   # MIN_OPENED_BEFORE_BUY 默认是 3（强制多开的诊断开关），Final-200 必须关掉，
   # 否则测出来的不是真实水平。
@@ -221,7 +272,7 @@ step_status() {
     fi
   done
   if [[ -f "${CAPPED}/manifest.json" ]]; then
-    "${PY}" scripts/show_sft_manifest.py "${CAPPED}/manifest.json" 2>/dev/null | sed -n '1,12p' | sed 's/^/  /'
+    "${PY}" scripts/show_sft_manifest.py "${CAPPED}/manifest.json" 2>/dev/null | sed 's/^/  /'
   fi
 
   echo
