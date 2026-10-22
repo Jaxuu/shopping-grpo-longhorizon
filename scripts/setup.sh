@@ -21,7 +21,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 cd "${ROOT}"
-uv sync --python "${MAIN_PYTHON}" --extra sft --extra grpo
+# 三个 extra 必须一起写：uv sync 会把「没列出来的 extra」的包**卸掉**，
+# 少写 sft-accelerated 就丢 liger-kernel（48 G 卡上不加它训练必 OOM），
+# 少写 grpo 就丢 vllm/verl/ray（评测起不来）。
+uv sync --python "${MAIN_PYTHON}" --extra sft --extra grpo --extra sft-accelerated
 
 if [[ ! -x "${ENV_DIR}/bin/python" ]]; then
   uv venv --python "${SHOPSIM_PYTHON}" "${ENV_DIR}"

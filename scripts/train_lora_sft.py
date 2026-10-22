@@ -210,7 +210,7 @@ def _validate_optional_training_dependencies(args):
         except ImportError as exc:
             raise SystemExit(
                 "--qlora 需要 bitsandbytes；请执行："
-                "uv sync --extra sft --extra sft-accelerated"
+                "uv sync --extra sft --extra grpo --extra sft-accelerated"
             ) from exc
     if args.liger_kernel:
         try:
@@ -218,7 +218,7 @@ def _validate_optional_training_dependencies(args):
         except ImportError as exc:
             raise SystemExit(
                 "--liger-kernel 需要 liger-kernel；请执行："
-                "uv sync --extra sft --extra sft-accelerated"
+                "uv sync --extra sft --extra grpo --extra sft-accelerated"
             ) from exc
 
 

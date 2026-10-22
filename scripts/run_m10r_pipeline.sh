@@ -157,6 +157,20 @@ EOF
     echo "outputs 所在盘只剩 ${free} GB；两段 merged 要 9–10 GB，至少清到 15 GB。" >&2
     return 1
   fi
+
+  # liger-kernel 不是可选优化。全词表 CE 在 ~21k token 上要 20 GiB 瞬时 fp32 张量
+  # （M5 stage-C 实测 "Tried to allocate 15.50 GiB" 直接 OOM），而 M10-R 的 A 段
+  # 全是探索轨迹（翻页 → 每页渲染 20 个商品），比 stage-C 只长不短。
+  # 它由 sft-accelerated extra 提供，setup.sh 漏写这个 extra 时 uv sync 会把它卸掉。
+  if ! "${PY}" -c 'import liger_kernel' >/dev/null 2>&1; then
+    cat >&2 <<EOF
+缺 liger-kernel：48 G 卡不加它，训练会在前几步 OOM（不是慢，是崩）。
+先重跑一次依赖（2–3 分钟）：
+  bash scripts/run_m10r_pipeline.sh env
+EOF
+    return 1
+  fi
+  echo "[ok] liger-kernel 可用"
   echo "[ok] 前置检查通过（显存 ${used:-?} MiB 已用，outputs 余量 ${free:-?} GB）"
 }
 
@@ -192,6 +206,7 @@ step_train() {
     chain=" && bash scripts/run_m10r_pipeline.sh eval"
   fi
   # expandable_segments 是历史踩坑的固定配置（碎片回收过 4.4 GiB），别省。
+  # --liger-kernel 与 M5-B（62% 冠军）同一配方，也是 48 G 卡不 OOM 的前提。
   launch m10r-train \
     "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
      bash scripts/sft_curriculum.sh \
@@ -199,6 +214,7 @@ step_train() {
        --manifest '${CAPPED}/manifest.json' \
        --output-root '${MODEL_DIR}' \
        --loss-scope tool-call-only \
+       --liger-kernel \
        --save-steps ${SAVE_STEPS} ${extra}${chain}"
   echo "[提示] A 段约 1.5 小时、B 段约 2.5 小时。进度：bash scripts/run_m10r_pipeline.sh status"
   echo "      被关机打断后再执行一次本命令即续跑（已完成的阶段会跳过）。"
