@@ -55,12 +55,31 @@ launch() {
   fi
   need_tmux
   if tmux has-session -t "${name}" 2>/dev/null; then
-    echo "[skip] 会话 [${name}] 已在跑：tmux attach -t ${name}"
-    return 0
+    if session_busy "${name}"; then
+      echo "[skip] 会话 [${name}] 正在跑：tmux attach -t ${name}"
+      return 0
+    fi
+    # 上一轮跑完了但会话留着（body 末尾的 exec bash），关掉重开——
+    # 否则续跑永远起不来，会一直显示"已在跑"。
+    tmux kill-session -t "${name}"
+    echo "[reuse] 会话 [${name}] 是上一轮跑完留下的，已关闭重开"
   fi
   tmux new-session -d -s "${name}" "${body}"
   echo "[run] 会话 [${name}] 已启动 · 日志 ${LOG_DIR}/${name}.log"
   echo "      回去看：tmux attach -t ${name}（脱离：Ctrl+B 松手再按 D）"
+}
+
+# 会话「在跑」还是「跑完停在 shell」：看 pane 的 shell 还有没有子进程。
+# body 末尾是 exec bash，所以跑完之后 shell 是孤零零一个，子进程数为 0。
+session_busy() {
+  local pid
+  pid="$(tmux list-panes -t "$1" -F '#{pane_pid}' 2>/dev/null | head -1)"
+  [[ -z "${pid}" ]] && return 1
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -P "${pid}" >/dev/null 2>&1
+  else
+    ps -eo ppid= 2>/dev/null | tr -d ' ' | grep -qx "${pid}"
+  fi
 }
 
 gpu_used_mib() {
@@ -248,8 +267,12 @@ step_status() {
   local any=0
   for name in m10r-env m10r-build m10r-train m10r-eval env vllm; do
     if tmux has-session -t "${name}" 2>/dev/null; then
-      echo "  [活] ${name}"
-      any=1
+      if session_busy "${name}"; then
+        echo "  [跑着] ${name}"
+        any=1
+      else
+        echo "  [已结束] ${name}（会话留着看输出；关掉：tmux kill-session -t ${name}）"
+      fi
     fi
   done
   (( any )) || echo "  （没有正在跑的会话）"
@@ -277,7 +300,7 @@ step_status() {
 
   echo
   echo "== 训练/评测进度（日志末尾）"
-  for name in m10r-train m10r-eval; do
+  for name in m10r-env m10r-build m10r-train m10r-eval; do
     if [[ -f "${LOG_DIR}/${name}.log" ]]; then
       echo "  --- ${name} ---"
       grep -E "stage|loss|epoch|eval|error|Error|OOM" "${LOG_DIR}/${name}.log" 2>/dev/null | tail -5 | sed 's/^/    /'
