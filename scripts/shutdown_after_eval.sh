@@ -15,9 +15,14 @@
 #   bash scripts/shutdown_after_eval.sh --dry-run    # 只打印它会做什么
 #   bash scripts/shutdown_after_eval.sh --no-shutdown-on-failure
 #                                                    # 训练失败时不关机（留着排查）
+#   bash scripts/shutdown_after_eval.sh --kill-init   # 容器里没有 systemd 时，
+#                                                    # 终止 1 号进程让容器退出
 #
 # 注意：容器里 shutdown 常常"命令存在但不生效"（Failed to connect to bus）。
-# 脚本会先探测 systemd，探测不到就打印清楚并退出——那种情况只能去平台 UI 关机。
+# 脚本会先探测 systemd（/run/systemd/system 存在且 1 号进程是 systemd），
+# 探测不到就打印清楚并退出——那种情况只能去平台 UI 关机。
+# --kill-init 是给容器用的兜底：它能让实例停止运行，但**平台是否停止计费
+# 需要在控制台确认一次**（有些平台"已停止"的容器仍然收存储费）。
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +40,9 @@ TRAIN_MAX_SECONDS="${TRAIN_MAX_SECONDS:-43200}"   # 12 h
 EVAL_MAX_SECONDS="${EVAL_MAX_SECONDS:-10800}"     # 3 h
 EVAL_GRACE_SECONDS="${EVAL_GRACE_SECONDS:-900}"   # 训练结束后等评测起来的上限 15 min
 SHUTDOWN_ON_FAILURE="${SHUTDOWN_ON_FAILURE:-1}"
+# 容器里没有 systemd，shutdown 是空操作。--kill-init 会直接终止 1 号进程让容器退出。
+# ⚠️ 这只保证"实例停止运行"，**不保证平台停止计费**——要在控制台确认一次。
+KILL_INIT=0
 DRY_RUN=0
 WATCH_INTERNAL=0
 
@@ -42,6 +50,7 @@ for arg in "$@"; do
   case "${arg}" in
     --dry-run) DRY_RUN=1 ;;
     --no-shutdown-on-failure) SHUTDOWN_ON_FAILURE=0 ;;
+    --kill-init) KILL_INIT=1 ;;
     --watch-internal) WATCH_INTERNAL=1 ;;
     *) echo "未知参数：${arg}" >&2; exit 2 ;;
   esac
@@ -160,8 +169,23 @@ PY
 
   local cmd
   if ! cmd="$(detect_poweroff)"; then
+    if (( KILL_INIT )); then
+      local pid1
+      pid1="$(ps -p 1 -o comm= 2>/dev/null)"
+      log "容器环境（1 号进程 ${pid1}）：没有 systemd，改用终止 1 号进程让容器退出。"
+      log "⚠️ 这只保证实例停止运行，平台是否停止计费要在控制台确认一次。"
+      kill -TERM 1 2>/dev/null || true
+      local i
+      for i in $(seq 1 20); do sleep 1; done
+      log "TERM 之后还活着，改用 KILL。"
+      kill -KILL 1 2>/dev/null || true
+      sleep 5
+      log "如果这条日志还能被看到，说明容器没被终止——只能去平台 UI 关机。"
+      return 3
+    fi
     log "这台机器没有 systemd（1 号进程是 $(ps -p 1 -o comm= 2>/dev/null)），容器内关不掉。"
     log "请到云平台控制台手动关机，否则会一直计费。"
+    log "（想让它自己退出容器：加 --kill-init；但计费是否停止需在控制台确认。）"
     return 3
   fi
 
@@ -182,7 +206,7 @@ fi
 if (( DRY_RUN )); then
   echo "[dry-run] 会话名 ${SESSION}，日志 ${LOG}"
   echo "[dry-run] 轮询 train → eval → 校验 → sync → 关机"
-  cmd="$(detect_poweroff)" || cmd="(探测不到 systemd，届时只会打印提示)"
+  cmd="$(detect_poweroff)" || cmd="(探测不到 systemd：默认只打印提示；加 --kill-init 则终止 1 号进程)"
   echo "[dry-run] 关机命令：${cmd}"
   exit 0
 fi
