@@ -216,7 +216,9 @@ step_train() {
        --loss-scope tool-call-only \
        --liger-kernel \
        --save-steps ${SAVE_STEPS} ${extra}${chain}"
-  echo "[提示] A 段约 1.5 小时、B 段约 2.5 小时。进度：bash scripts/run_m10r_pipeline.sh status"
+  # 数字来自 scripts/estimate_sft_train_time.py（M5 同类 48 GB 卡三点实测外推），
+  # 不要写回「1.5 + 2.5 小时」——那是按旧池 1593 行次算的，exploratory 比 strategy 长 1.5 倍。
+  echo "[提示] A 段约 2.2–2.7 小时、B 段约 3.4–3.8 小时（实测标定外推）。进度：bash scripts/run_m10r_pipeline.sh status"
   echo "      被关机打断后再执行一次本命令即续跑（已完成的阶段会跳过）。"
   if [[ "${AUTO_EVAL:-0}" == "1" ]]; then
     echo "      训练成功后自动起评测（会话 m10r-eval，日志 outputs/logs/m10r-eval.log）。"
