@@ -35,6 +35,10 @@ LABEL="${LABEL:-m10r-final200}"
 MODEL="${MODEL:-${MODEL_DIR}/stage-b/merged}"
 KEEP_TEMPLATE="${KEEP_TEMPLATE:-700}"
 SAVE_STEPS="${SAVE_STEPS:-25}"
+# 空 = 用 run_sft_curriculum 的默认值 Qwen/Qwen3.5-2B（走 HF 缓存）。
+# 国内机器连不上 hub 时 transformers 会卡在 "Retrying [Retry 1/5]"，
+# 这时传本地目录（如 /root/rivermind-data/hf/Qwen3.5-2B）彻底绕开网络。
+BASE_MODEL="${BASE_MODEL:-}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -171,6 +175,15 @@ EOF
     return 1
   fi
   echo "[ok] liger-kernel 可用"
+
+  # 给了本地模型目录就查一眼，别等 transformers 报一个难读的错。
+  if [[ -n "${BASE_MODEL}" ]]; then
+    if [[ ! -f "${BASE_MODEL}/config.json" ]]; then
+      echo "BASE_MODEL=${BASE_MODEL} 下没有 config.json；它应该是本地模型目录，不是 hub id。" >&2
+      return 1
+    fi
+    echo "[ok] 基座模型：${BASE_MODEL}（本地目录，不走网络）"
+  fi
   echo "[ok] 前置检查通过（显存 ${used:-?} MiB 已用，outputs 余量 ${free:-?} GB）"
 }
 
@@ -199,6 +212,7 @@ step_train() {
   local extra=""
   [[ "${start}" != "a" ]] && extra="--start-stage ${start}"
   [[ -n "${resume}" ]] && extra="${extra} --resume-from-checkpoint '${resume}'"
+  [[ -n "${BASE_MODEL}" ]] && extra="${extra} --base-model '${BASE_MODEL}'"
   # AUTO_EVAL=1：训练跑完接着起评测。串在同一个 tmux 里用 &&，训练失败就不会去测
   # 一个半成品权重（那样只会浪费时间，还会让人误判成模型变差）。
   local chain=""
