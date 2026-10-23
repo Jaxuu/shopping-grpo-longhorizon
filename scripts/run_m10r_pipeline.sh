@@ -7,6 +7,7 @@
 #
 # 用法
 # ----
+#   bash scripts/run_m10r_pipeline.sh check    # 0. 自检（显卡/磁盘/依赖/权重/增量），换机器先跑这个
 #   bash scripts/run_m10r_pipeline.sh env      # 0. 依赖（uv sync，幂等，首次 3–5 分钟）
 #   bash scripts/run_m10r_pipeline.sh build    # 1. 建池（纯 CPU，约 2 分钟）
 #   bash scripts/run_m10r_pipeline.sh train    # 2. 训练（要显卡，约 3.5–4 小时；被关机打断后再执行一次即续跑）
@@ -121,6 +122,116 @@ gpu_used_mib() {
 
 free_gb() {
   df -Pk "$1" 2>/dev/null | awk 'NR==2{printf "%d", $4/1024/1024}'
+}
+
+# ---------------------------------------------------------------- check
+# 换机器后第一件事。原因：**权重和采集增量都在 outputs/ 下，而 outputs/ 是
+# gitignored**——git clone 下来它们一个都没有。缺了不会在 clone 时报错，
+# 只会在跑到一半时失败，或者更糟：静默地从原始底座开始训。
+# 这个子命令把「跑之前必须存在的东西」一次列清，缺哪条直接说。
+step_check() {
+  local missing=0
+  local ok="  [有]" no="  [缺]"
+
+  echo "== 1. 显卡 =="
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local total used
+    total="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+    used="$(gpu_used_mib)"
+    if [[ -n "${total}" ]] && (( total >= 40000 )); then
+      echo "${ok} 显存 ${total} MiB（训练够用；标定卡是 48 GB 同类）"
+    else
+      echo "${no} 显存 ${total:-?} MiB —— 训练需要 ≥ 40 GB（2 万 token 全词表 CE 的瞬时张量）"
+      echo "      24 GB 只够跑评测，训练会 OOM。"
+      missing=1
+    fi
+    [[ -n "${used}" ]] && echo "      当前已用 ${used} MiB（训练前要 < 2000）"
+  else
+    echo "${no} 找不到 nvidia-smi"
+    missing=1
+  fi
+
+  echo "== 2. 磁盘 =="
+  local out_free
+  out_free="$(free_gb "${ROOT}/outputs")"
+  if [[ -n "${out_free}" ]] && (( out_free >= 12 )); then
+    echo "${ok} outputs 所在盘余 ${out_free} GB（单阶段要一个 merged ≈ 5 GB）"
+  else
+    echo "${no} outputs 所在盘只剩 ${out_free:-?} GB —— 至少清到 15 GB"
+    missing=1
+  fi
+
+  echo "== 3. 依赖 =="
+  command -v uv >/dev/null 2>&1 \
+    && echo "${ok} uv（setup.sh 需要）" \
+    || { echo "${no} uv —— 先装：curl -LsSf https://astral.sh/uv/install.sh | sh"; missing=1; }
+  command -v tmux >/dev/null 2>&1 \
+    && echo "${ok} tmux（所有步骤都在 tmux 会话里跑）" \
+    || { echo "${no} tmux —— apt install tmux"; missing=1; }
+  if [[ -x "${PY}" ]]; then
+    echo "${ok} Python：${PY}"
+    if "${PY}" -c 'import liger_kernel' >/dev/null 2>&1; then
+      echo "${ok} liger-kernel（48 G 卡不加它训练必 OOM）"
+    else
+      echo "${no} liger-kernel —— 跑 env 步骤（3–5 分钟）"
+      missing=1
+    fi
+  else
+    echo "${no} Python：${PY} —— 先跑 env 步骤"
+    missing=1
+  fi
+
+  echo "== 4. 数据（在 git 里，clone 就有）=="
+  local file
+  for file in \
+    "data/sft_pure_v4/all.jsonl" \
+    "data/sft_pure_v4/difficulty_labels.jsonl" \
+    "data/evaluation/tasks.jsonl"; do
+    [[ -f "${ROOT}/${file}" ]] && echo "${ok} ${file}" || { echo "${no} ${file}"; missing=1; }
+  done
+
+  echo "== 5. 采集增量（⚠️ 不在 git 里，换机器必须自己搬）=="
+  local increments=0 inc
+  for inc in \
+    "outputs/m10-paging-requery/kept.jsonl" \
+    "outputs/m10-paging/kept.jsonl" \
+    "outputs/m10-compare/kept.jsonl" \
+    "outputs/m10-requery/kept.jsonl" \
+    "outputs/m10-rank2/kept.jsonl"; do
+    if [[ -f "${ROOT}/${inc}" ]]; then
+      echo "${ok} ${inc}（$(wc -l <"${ROOT}/${inc}" | tr -d ' ') 行）"
+      increments=$(( increments + 1 ))
+    else
+      echo "${no} ${inc}"
+    fi
+  done
+  if (( increments == 0 )); then
+    echo "      ↑ 一条都没有：build 会直接失败。翻页示范全在这些文件里，"
+    echo "        没有它们这个方案就退化成「用旧池再训一遍」，等于白跑。"
+    missing=1
+  fi
+
+  echo "== 6. 热启动权重（单阶段专用；⚠️ 也不在 git 里）=="
+  if [[ "${STAGE_PLAN}" == "single" ]]; then
+    if [[ -f "${WARM_START}/config.json" ]]; then
+      echo "${ok} ${WARM_START}（62% 基线，Final-200 124/200）"
+    else
+      echo "${no} ${WARM_START}/config.json"
+      echo "      这是 M5-B 的合并权重（约 4.2 GB）。没有它单阶段就得从"
+      echo "      Qwen3.5-2B 重新学「怎么购物」，136 步不够（M5 用了 423 步）。"
+      missing=1
+    fi
+  else
+    echo "      （当前 STAGE_PLAN=${STAGE_PLAN}，不需要热启动）"
+  fi
+
+  echo
+  if (( missing == 0 )); then
+    echo "全部就绪。下一步：bash scripts/run_m10r_pipeline.sh env"
+  else
+    echo "上面标 [缺] 的必须先解决，否则会跑到一半才失败（或静默训错）。"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------- env
@@ -438,6 +549,7 @@ step_status() {
 }
 
 case "${1:-status}" in
+  check)  step_check ;;
   env)    step_env ;;
   build)  step_build ;;
   train)  step_train ;;
