@@ -34,6 +34,11 @@ CAPPED="${ROOT}/data/sft_m10r/capped"
 MODEL_DIR="${ROOT}/outputs/models/sft-m10r"
 LABEL="${LABEL:-m10r-final200}"
 MODEL="${MODEL:-${MODEL_DIR}/stage-b/merged}"
+# 统一成绝对路径：preflight_eval 靠「vLLM 进程命令行里有没有这个路径」判断是否
+# 在服务同一份权重，相对路径比不过绝对路径会误判成「服务的是别的模型」。
+if [[ -d "${MODEL}" ]]; then
+  MODEL="$(cd "${MODEL}" && pwd)"
+fi
 KEEP_TEMPLATE="${KEEP_TEMPLATE:-700}"
 SAVE_STEPS="${SAVE_STEPS:-25}"
 # 空 = 用 run_sft_curriculum 的默认值 Qwen/Qwen3.5-2B（走 HF 缓存）。
