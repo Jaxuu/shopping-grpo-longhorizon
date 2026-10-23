@@ -75,11 +75,16 @@ mkdir -p "${LOG_DIR}"
 die() { printf '失败：%s\n' "$*" >&2; exit 1; }
 need_tmux() { command -v tmux >/dev/null 2>&1 || die "找不到 tmux，先 apt install tmux"; }
 
-# 起一个会话；已存在就跳过（不重复跑、不覆盖日志）。
+# 起一个会话；已存在就跳过（不重复跑）。
+# 日志按「每次运行一份」轮转，上一份留成 .prev：
+# 追加写会让**上一轮的错误**一直留在文件里——2026-10-23 就因为 status 的日志末尾
+# 还挂着 15:35 那次失败的 traceback，让人以为新起的训练又挂了。
+# 轮转后 status / tail 看到的永远只有本次运行。
 launch() {
   local name="$1"
   shift
-  local body="cd '${ROOT}' && { $* ; } 2>&1 | tee -a '${LOG_DIR}/${name}.log'; \
+  local log="${LOG_DIR}/${name}.log"
+  local body="cd '${ROOT}' && { $* ; } 2>&1 | tee -a '${log}'; \
      echo; echo '[结束] 会话保留中；Ctrl+B 松手按 D 脱离，或 exit 关闭'; exec bash"
   # PIPELINE_DRY=1 只打印不启动：改完脚本先看一眼要跑什么，别拿 2 小时的训练试错。
   if [[ "${PIPELINE_DRY:-0}" == "1" ]]; then
@@ -98,8 +103,12 @@ launch() {
     tmux kill-session -t "${name}"
     echo "[reuse] 会话 [${name}] 是上一轮跑完留下的，已关闭重开"
   fi
+  if [[ -s "${log}" ]]; then
+    mv -f "${log}" "${log}.prev"
+    echo "[log] 上一份日志留档：${log}.prev"
+  fi
   tmux new-session -d -s "${name}" "${body}"
-  echo "[run] 会话 [${name}] 已启动 · 日志 ${LOG_DIR}/${name}.log"
+  echo "[run] 会话 [${name}] 已启动 · 日志 ${log}"
   echo "      回去看：tmux attach -t ${name}（脱离：Ctrl+B 松手再按 D）"
 }
 
