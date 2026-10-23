@@ -18,9 +18,10 @@
 #   回去看：tmux attach -t m10r-train    脱离：Ctrl+B 松手再按 D
 #
 # 可覆盖的环境变量
+#   STAGE_PLAN=single      训练方案：reverse（倒序两段，M10-R v1，已证伪）/ single（单阶段全量）
 #   KEEP_TEMPLATE=700      模板保留条数（建池）
 #   LABEL=m10r-final200    评测输出目录名
-#   MODEL=...              评测权重（默认 outputs/models/sft-m10r/stage-b/merged）
+#   MODEL=...              评测权重（默认取 manifest 最后一个阶段的 merged）
 #   SAVE_STEPS=25          训练每 25 步存一次 checkpoint（定时关机时的中断粒度）
 #   AUTO_EVAL=1            训练成功后自动接着跑 Final-200（无人值守用这个）
 set -uo pipefail
@@ -33,7 +34,23 @@ LOG_DIR="${ROOT}/outputs/logs"
 CAPPED="${ROOT}/data/sft_m10r/capped"
 MODEL_DIR="${ROOT}/outputs/models/sft-m10r"
 LABEL="${LABEL:-m10r-final200}"
-MODEL="${MODEL:-${MODEL_DIR}/stage-b/merged}"
+# reverse（倒序两段）/ single（单阶段全量）。单阶段的最终产物是 stage-full/merged，
+# 所以下面的 MODEL 默认值不能写死 stage-b。
+STAGE_PLAN="${STAGE_PLAN:-reverse}"
+FINAL_STAGE="${FINAL_STAGE:-}"
+if [[ -z "${FINAL_STAGE}" && -f "${CAPPED}/manifest.json" ]]; then
+  # 取 manifest 里的最后一个阶段：两段是 b，单阶段是 full。
+  FINAL_STAGE="$("${PY}" -c 'import json,sys;print(list(json.load(open(sys.argv[1],encoding="utf-8"))["stages"])[-1])' \
+    "${CAPPED}/manifest.json" 2>/dev/null || true)"
+fi
+[[ -n "${FINAL_STAGE}" ]] || FINAL_STAGE="$([[ "${STAGE_PLAN}" == "single" ]] && echo full || echo b)"
+FIRST_STAGE="${FIRST_STAGE:-}"
+if [[ -z "${FIRST_STAGE}" && -f "${CAPPED}/manifest.json" ]]; then
+  FIRST_STAGE="$("${PY}" -c 'import json,sys;print(list(json.load(open(sys.argv[1],encoding="utf-8"))["stages"])[0])' \
+    "${CAPPED}/manifest.json" 2>/dev/null || true)"
+fi
+[[ -n "${FIRST_STAGE}" ]] || FIRST_STAGE="$([[ "${STAGE_PLAN}" == "single" ]] && echo full || echo a)"
+MODEL="${MODEL:-${MODEL_DIR}/stage-${FINAL_STAGE}/merged}"
 # 统一成绝对路径：preflight_eval 靠「vLLM 进程命令行里有没有这个路径」判断是否
 # 在服务同一份权重，相对路径比不过绝对路径会误判成「服务的是别的模型」。
 if [[ -d "${MODEL}" ]]; then
@@ -45,6 +62,12 @@ SAVE_STEPS="${SAVE_STEPS:-25}"
 # 国内机器连不上 hub 时 transformers 会卡在 "Retrying [Retry 1/5]"，
 # 这时传本地目录（如 /root/rivermind-data/hf/Qwen3.5-2B）彻底绕开网络。
 BASE_MODEL="${BASE_MODEL:-}"
+# 单阶段（M10-R v2）必须从 62% 那个已收敛的基线热启动，否则 136 步不够同时
+# 学会「怎么购物」和「什么时候翻页」（M5 从原始底座用了 423 步才到 62%）。
+WARM_START="${WARM_START:-${ROOT}/outputs/models/sft-b-curriculum/stage-c/merged}"
+if [[ "${STAGE_PLAN}" == "single" && -z "${BASE_MODEL}" ]]; then
+  BASE_MODEL="${WARM_START}"
+fi
 
 mkdir -p "${LOG_DIR}"
 
@@ -111,7 +134,8 @@ step_env() {
 # ---------------------------------------------------------------- build
 step_build() {
   [[ -x "${PY}" ]] || die "找不到 Python：${PY}（先跑 env 步骤，或设置 PY）"
-  launch m10r-build "KEEP_TEMPLATE=${KEEP_TEMPLATE} bash scripts/run_m10r_build.sh"
+  launch m10r-build \
+    "KEEP_TEMPLATE=${KEEP_TEMPLATE} STAGE_PLAN=${STAGE_PLAN} bash scripts/run_m10r_build.sh"
 }
 
 # ---------------------------------------------------------------- train
@@ -123,22 +147,34 @@ stage_done() {
 latest_checkpoint() {
   ls -1d "${MODEL_DIR}/stage-$1/adapter"/checkpoint-* 2>/dev/null | sort -V | tail -1
 }
+stage_order() {
+  # 阶段名由 manifest 决定（两段是 a b，单阶段是 full），不能写死。
+  [[ -f "${CAPPED}/manifest.json" ]] || return 1
+  "${PY}" -c 'import json,sys;print(" ".join(json.load(open(sys.argv[1],encoding="utf-8"))["stages"]))' \
+    "${CAPPED}/manifest.json" 2>/dev/null
+}
 
 # 断点续跑的判据只有两条，全在磁盘上：合并好的阶段算「做完」，adapter 下的
 # checkpoint-NNN 算「做到第 N 步」。所以 train 可以反复执行——它自己决定从哪接。
 plan_resume() {
-  local start="" resume=""
-  if stage_done a && stage_done b; then
-    echo "两段都已完成，没有可续的：${MODEL_DIR}/stage-b/merged" >&2
+  local stages name start="" resume="" pending=0
+  stages="$(stage_order || true)"
+  if [[ -z "${stages}" ]]; then
+    echo "读不到 ${CAPPED}/manifest.json 的阶段列表（先跑 build）" >&2
     return 1
   fi
-  if stage_done a; then start="b"; fi
-  if [[ -z "${start}" ]]; then
-    start="a"
-    resume="$(latest_checkpoint a || true)"
-  else
-    resume="$(latest_checkpoint b || true)"
+  for name in ${stages}; do
+    if ! stage_done "${name}"; then
+      start="${name}"
+      pending=1
+      break
+    fi
+  done
+  if (( pending == 0 )); then
+    echo "所有阶段都已完成，没有可续的：${MODEL_DIR}/stage-${FINAL_STAGE}/merged" >&2
+    return 1
   fi
+  resume="$(latest_checkpoint "${start}" || true)"
   printf '%s\n%s\n' "${start}" "${resume}"
 }
 
@@ -198,7 +234,7 @@ step_train() {
   local plan start resume
   if [[ "${PIPELINE_DRY:-0}" == "1" ]]; then
     echo "[dry] 跳过显卡/磁盘检查，但仍按盘上的产物算续跑点（PIPELINE_DRY=1）"
-    plan="$(plan_resume)" || plan=$'a\n'
+    plan="$(plan_resume)" || plan="$(printf '%s\n' "${FIRST_STAGE}")"
     start="$(sed -n 1p <<<"${plan}")"
     resume="$(sed -n 2p <<<"${plan}")"
   else
@@ -206,8 +242,8 @@ step_train() {
     plan="$(plan_resume)" || die "没有可续的训练"
     start="$(sed -n 1p <<<"${plan}")"
     resume="$(sed -n 2p <<<"${plan}")"
-    if [[ "${start}" == "b" ]]; then
-      echo "[resume] A 段已完成（stage-a/merged 在盘上），从 B 段开始。"
+    if [[ "${start}" != "${FIRST_STAGE}" ]]; then
+      echo "[resume] 前序阶段已完成（stage-*/merged 在盘上），从 ${start} 段开始。"
     fi
     if [[ -n "${resume}" ]]; then
       echo "[resume] 找到中途存档：${resume}"
@@ -216,7 +252,7 @@ step_train() {
     fi
   fi
   local extra=""
-  [[ "${start}" != "a" ]] && extra="--start-stage ${start}"
+  [[ "${start}" != "${FIRST_STAGE}" ]] && extra="--start-stage ${start}"
   [[ -n "${resume}" ]] && extra="${extra} --resume-from-checkpoint '${resume}'"
   [[ -n "${BASE_MODEL}" ]] && extra="${extra} --base-model '${BASE_MODEL}'"
   # AUTO_EVAL=1：训练跑完接着起评测。串在同一个 tmux 里用 &&，训练失败就不会去测
@@ -238,7 +274,11 @@ step_train() {
        --save-steps ${SAVE_STEPS} ${extra}${chain}"
   # 数字来自 scripts/estimate_sft_train_time.py（M5 同类 48 GB 卡三点实测外推），
   # 不要写回「1.5 + 2.5 小时」——那是按旧池 1593 行次算的，exploratory 比 strategy 长 1.5 倍。
-  echo "[提示] A 段约 2.2–2.7 小时、B 段约 3.4–3.8 小时（实测标定外推）。进度：bash scripts/run_m10r_pipeline.sh status"
+  if [[ "${STAGE_PLAN}" == "single" ]]; then
+    echo "[提示] 单阶段全量约 4–4.5 小时（1,089 行 ≈ 136 步）。进度：bash scripts/run_m10r_pipeline.sh status"
+  else
+    echo "[提示] A 段约 2.2–2.7 小时、B 段约 3.4–3.8 小时（实测标定外推）。进度：bash scripts/run_m10r_pipeline.sh status"
+  fi
   echo "      被关机打断后再执行一次本命令即续跑（已完成的阶段会跳过）。"
   if [[ "${AUTO_EVAL:-0}" == "1" ]]; then
     echo "      训练成功后自动起评测（会话 m10r-eval，日志 outputs/logs/m10r-eval.log）。"

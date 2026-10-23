@@ -37,6 +37,29 @@ BEHAVIOR_STAGE_CONFIG = {
     },
 }
 BUCKET_MODES = ("difficulty", "behavior")
+# 「单阶段」（2026-10-23 起，M10-R v2）：不做课程，在全量分布上直接训 1 个 epoch。
+# 为什么放弃两段：A 段单独评测证明了两件事——
+#   ① 模型**忠实复现数据里的行为比例**：A 段数据翻页占 28%，输出就是 31%；
+#   ② B 段从「翻页 30%」出发、用 11.9% 的全量池训 137 步，被反向修正**过冲到 1%**。
+# 所以正确做法是「从 0% 出发 + 数据比例本身就是目标比例」，只有一个阶段才不会过冲。
+# lr 与旧课程末段一致（5e-5），保证与 M5-B / M10-R 可比。
+SINGLE_STAGE_CONFIG = {
+    "difficulty": {
+        "full": {
+            "buckets": ["foundation", "constraints", "strategy"],
+            "epochs": 1.0,
+            "learning_rate": 5e-5,
+        }
+    },
+    "behavior": {
+        "full": {
+            "buckets": ["exploratory", "template", "other"],
+            "epochs": 1.0,
+            "learning_rate": 5e-5,
+        }
+    },
+}
+STAGE_PLANS = ("reverse", "single")
 # 只有 next_page 算「翻页探索」。**prev_page 不算**——它是「从商品详情退回列表」
 # 的常规导航，池子里出现 2,032 次，把它算成探索会让 1,098 条模板轨迹被误判成探索
 # （2026-10-22 实测：误判后模板只剩 154 条，而真实是 1,108 条）。
@@ -194,6 +217,21 @@ def _split(ids: list[int], *, seed: int, validation_ratio: float) -> tuple[list[
     return train, validation
 
 
+def stage_config_for(bucket_mode: str, stage_plan: str = "reverse") -> dict:
+    """按「分桶口径 × 阶段方案」取阶段配置。
+
+    ``reverse`` = 倒序两段（先探索后全量，M10-R v1，已证伪）；
+    ``single``  = 单阶段全量（M10-R v2）。
+    """
+    if bucket_mode not in BUCKET_MODES:
+        raise ValueError(f"bucket_mode must be one of {BUCKET_MODES}")
+    if stage_plan not in STAGE_PLANS:
+        raise ValueError(f"stage_plan must be one of {STAGE_PLANS}")
+    if stage_plan == "single":
+        return SINGLE_STAGE_CONFIG[bucket_mode]
+    return STAGE_CONFIG if bucket_mode == "difficulty" else BEHAVIOR_STAGE_CONFIG
+
+
 def build_manifest(
     rows: list[dict],
     labels: list[dict],
@@ -202,12 +240,11 @@ def build_manifest(
     seed: int = 20260814,
     validation_ratio: float = 0.1,
     bucket_mode: str = "difficulty",
+    stage_plan: str = "reverse",
 ) -> dict:
     if not 0 <= validation_ratio < 1:
         raise ValueError("validation_ratio must be in [0, 1)")
-    if bucket_mode not in BUCKET_MODES:
-        raise ValueError(f"bucket_mode must be one of {BUCKET_MODES}")
-    stage_config = STAGE_CONFIG if bucket_mode == "difficulty" else BEHAVIOR_STAGE_CONFIG
+    stage_config = stage_config_for(bucket_mode, stage_plan)
     bucket_names = list(
         dict.fromkeys(
             name for config in stage_config.values() for name in config["buckets"]
@@ -292,6 +329,7 @@ def build_manifest(
         "split_seed": int(seed),
         "validation_ratio": float(validation_ratio),
         "bucket_mode": bucket_mode,
+        "stage_plan": stage_plan,
         "counts": {
             "rows": len(rows),
             "train": train_count,
@@ -329,6 +367,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--stage-plan",
+        choices=STAGE_PLANS,
+        default="reverse",
+        help=(
+            "reverse = 倒序两段（先探索后全量，M10-R v1，已证伪）；"
+            "single = 单阶段全量（M10-R v2，从 0% 出发按数据比例学）"
+        ),
+    )
+    parser.add_argument(
         "--admission-contract",
         default=None,
         help="Stamp manifest.admission with this contract version (M4 rebuild keeps it).",
@@ -349,6 +396,7 @@ def main() -> int:
         seed=args.seed,
         validation_ratio=args.validation_ratio,
         bucket_mode=args.bucket_mode,
+        stage_plan=args.stage_plan,
     )
     manifest["source"] = {
         "path": _portable_path(args.source, root),

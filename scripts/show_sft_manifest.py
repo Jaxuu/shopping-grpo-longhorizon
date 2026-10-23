@@ -24,8 +24,8 @@ import argparse
 import json
 from pathlib import Path
 
-STAGE_LABEL_DIFFICULTY = {"a": "A 打基础", "b": "B 加约束", "c": "C 加策略"}
-STAGE_LABEL_BEHAVIOR = {"a": "A 学探索", "b": "B 全量收敛"}
+STAGE_LABEL_DIFFICULTY = {"a": "A 打基础", "b": "B 加约束", "c": "C 加策略", "full": "单阶段全量"}
+STAGE_LABEL_BEHAVIOR = {"a": "A 学探索", "b": "B 全量收敛", "full": "单阶段全量"}
 BUCKET_LABEL = {
     "foundation": "基础（simple）",
     "constraints": "约束（medium 且不需换词/对比）",
@@ -72,9 +72,12 @@ def render(manifest: dict) -> str:
         )
 
     labels = stage_labels(manifest)
+    single = manifest.get("stage_plan") == "single"
     lines += [
         "",
-        "## 阶段（累积：后一阶段包含前一阶段的全部桶）",
+        "## 阶段（单阶段：全量分布 1 个 epoch）"
+        if single
+        else "## 阶段（累积：后一阶段包含前一阶段的全部桶）",
         "",
         "| 阶段 | 包含的桶 | 累计 train 行 | 本阶段新增 | epochs | lr |",
         "|---|---|---:|---:|---:|---:|",

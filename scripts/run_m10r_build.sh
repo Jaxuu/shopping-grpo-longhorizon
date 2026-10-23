@@ -51,6 +51,12 @@ EVALUATION="${EVALUATION:-data/evaluation/tasks.jsonl}"
 # 模板轨迹保留条数（1,912 → 约 1,250 的那一刀）与课程分桶口径。
 KEEP_TEMPLATE="${KEEP_TEMPLATE:-700}"
 BUCKET_MODE="${BUCKET_MODE:-behavior}"
+# reverse = 倒序两段（M10-R v1，已证伪：B 段把 A 段的翻页从 30% 压过冲到 1%）；
+# single  = 单阶段全量（M10-R v2）。
+STAGE_PLAN="${STAGE_PLAN:-reverse}"
+# 单阶段必须从 62% 那个已收敛的基线热启动（M5 从原始底座用了 423 步才到 62%，
+# 单阶段只有 136 步）。这里只用于**打印**训练命令，真正透传在 run_m10r_pipeline.sh。
+WARM_START="${WARM_START:-outputs/models/sft-b-curriculum/stage-c/merged}"
 
 mkdir -p "${OUT_DIR}"
 STAGED="${OUT_DIR}/increment_merged.jsonl"
@@ -99,12 +105,17 @@ CAPPED="${OUT_DIR}/capped"
   --out-dir "${CAPPED}"
 
 echo
-echo "[4/4] 生成课程清单（倒序两段：先探索，后全量）"
+if [[ "${STAGE_PLAN}" == "single" ]]; then
+  echo "[4/4] 生成课程清单（单阶段：全量分布 1 个 epoch）"
+else
+  echo "[4/4] 生成课程清单（倒序两段：先探索，后全量）"
+fi
 "${PY}" scripts/prepare_sft_curriculum.py \
   --source "${CAPPED}/all.jsonl" \
   --labels "${CAPPED}/difficulty_labels.jsonl" \
   --evaluation "${EVALUATION}" \
   --bucket-mode "${BUCKET_MODE}" \
+  --stage-plan "${STAGE_PLAN}" \
   --output "${CAPPED}/manifest.json"
 
 echo
@@ -119,17 +130,23 @@ TRAIN_CMD=(
   --output-root outputs/models/sft-m10r
   --loss-scope tool-call-only
 )
+# 单阶段漏了 --base-model 就会从 Qwen3.5-2B 重新学「怎么购物」，136 步不够。
+BASE_ARGS=()
+if [[ "${STAGE_PLAN}" == "single" ]]; then
+  BASE_ARGS=(--base-model "${WARM_START}")
+fi
 if [[ "${DRY_RUN}" == "1" ]]; then
   echo "训练命令（--dry-run 只打印，不执行）："
-  printf '  %q' "${TRAIN_CMD[@]}"; echo
+  printf '  %q' "${TRAIN_CMD[@]}" "${BASE_ARGS[@]}"; echo
   "${PY}" scripts/run_sft_curriculum.py \
     --source "${CAPPED}/all.jsonl" \
     --manifest "${CAPPED}/manifest.json" \
     --output-root outputs/models/sft-m10r \
     --loss-scope tool-call-only \
+    "${BASE_ARGS[@]}" \
     --dry-run
   exit 0
 fi
 
-echo "完成。训练命令（要显卡；倒序两段课程 + tool-call-only loss）："
-printf '  %q' "${TRAIN_CMD[@]}"; echo
+echo "完成。训练命令（要显卡；$( [[ "${STAGE_PLAN}" == "single" ]] && echo "单阶段全量" || echo "倒序两段课程" ) + tool-call-only loss）："
+printf '  %q' "${TRAIN_CMD[@]}" "${BASE_ARGS[@]}"; echo

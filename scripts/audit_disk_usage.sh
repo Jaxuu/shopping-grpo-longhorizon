@@ -38,9 +38,11 @@ PROTECT=(
   "outputs/models/sft-b-curriculum/stage-c/merged"
   # GRPO champion：grpo-m6/global_step_50
   "outputs/models/grpo-m6/global_step_50"
-  # 本轮实验产物（stage-a 还要单独评测）；连 adapter 一起留，否则没法续跑
+  # 本轮实验产物（stage-a 还要单独评测）；连 adapter 一起留，否则没法续跑。
+  # stage-full 是单阶段方案（M10-R v2）的产物目录，命名规则与 a/b 一致。
   "outputs/models/sft-m10r/stage-a"
   "outputs/models/sft-m10r/stage-b"
+  "outputs/models/sft-m10r/stage-full"
   # 证据归档（M6-R 崩溃现场）
   "outputs/archive"
   # 评测结果与训练日志：分数、失败解剖、每步 loss 的唯一原始记录，都只有几十 MB

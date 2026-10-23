@@ -32,7 +32,17 @@ PY="${PY:-${ROOT}/.venv/bin/python}"
 LOG_DIR="${ROOT}/outputs/logs"
 LABEL="${LABEL:-m10r-final200}"
 SUMMARY="${ROOT}/outputs/evaluation/${LABEL}/summary.json"
-FINAL_MODEL="${ROOT}/outputs/models/sft-m10r/stage-b/merged/config.json"
+# 阶段名由 manifest 决定（两段是 b，单阶段是 full），不能写死——写死的话单阶段
+# 跑完会被这里判成「训练失败」，白等一场还关不了机。
+STAGE_PLAN="${STAGE_PLAN:-reverse}"
+FINAL_STAGE="${FINAL_STAGE:-}"
+MANIFEST="${ROOT}/data/sft_m10r/capped/manifest.json"
+if [[ -z "${FINAL_STAGE}" && -f "${MANIFEST}" ]]; then
+  FINAL_STAGE="$("${PY}" -c 'import json,sys;print(list(json.load(open(sys.argv[1],encoding="utf-8"))["stages"])[-1])' \
+    "${MANIFEST}" 2>/dev/null || true)"
+fi
+[[ -n "${FINAL_STAGE}" ]] || FINAL_STAGE="$([[ "${STAGE_PLAN}" == "single" ]] && echo full || echo b)"
+FINAL_MODEL="${ROOT}/outputs/models/sft-m10r/stage-${FINAL_STAGE}/merged/config.json"
 LOG="${LOG_DIR}/m10r-watch.log"
 SESSION="m10r-watch"
 
@@ -123,7 +133,7 @@ watch() {
 
   # ---- 2. 训练失败：按开关决定是否关机
   if (( ! train_ok )); then
-    log "训练没有产出 stage-b/merged —— 视为失败。"
+    log "训练没有产出 stage-${FINAL_STAGE}/merged —— 视为失败。"
     if (( SHUTDOWN_ON_FAILURE )); then
       log "按默认策略仍然关机（省电费）；要保留机器排查，用 --no-shutdown-on-failure。"
     else
@@ -206,6 +216,8 @@ fi
 if (( DRY_RUN )); then
   echo "[dry-run] 会话名 ${SESSION}，日志 ${LOG}"
   echo "[dry-run] 轮询 train → eval → 校验 → sync → 关机"
+  # 这一行是排错的关键：阶段名写错时，跑完 8 小时会被判成「训练失败」。
+  echo "[dry-run] 认定训练完成的标志：${FINAL_MODEL}（阶段 ${FINAL_STAGE}）"
   cmd="$(detect_poweroff)" || cmd="(探测不到 systemd：默认只打印提示；加 --kill-init 则终止 1 号进程)"
   echo "[dry-run] 关机命令：${cmd}"
   exit 0

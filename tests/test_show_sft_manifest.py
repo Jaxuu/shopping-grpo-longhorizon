@@ -59,5 +59,45 @@ class ShowManifestTest(unittest.TestCase):
         self.assertNotIn("trajectory_long", text)
 
 
+def single_manifest() -> dict:
+    """单阶段（M10-R v2）：只有一个 full 阶段，标签不能退化成原始的 "full"。"""
+    return {
+        "counts": {"rows": 100, "train": 90, "validation": 10, "evaluation_overlap": 0},
+        "bucket_mode": "behavior",
+        "stage_plan": "single",
+        "buckets": {
+            "exploratory": {"rows": 40, "train_task_ids": [1, 2], "validation_task_ids": [3]},
+            "template": {"rows": 55, "train_task_ids": [4], "validation_task_ids": []},
+            "other": {"rows": 5, "train_task_ids": [], "validation_task_ids": []},
+        },
+        "stages": {
+            "full": {
+                "buckets": ["exploratory", "template", "other"],
+                "epochs": 1.0,
+                "learning_rate": 5e-5,
+                "train_rows": 3,
+            }
+        },
+        "review_flags": {},
+    }
+
+
+class ShowSingleStageManifestTest(unittest.TestCase):
+    def test_header_says_single_stage_not_cumulative(self):
+        text = module.render(single_manifest())
+        self.assertIn("## 阶段（单阶段：全量分布 1 个 epoch）", text)
+        # 「累积」的说法在两段/三段课程里成立，单阶段下会让人以为还有第二阶段
+        self.assertNotIn("累积：后一阶段包含前一阶段的全部桶", text)
+
+    def test_full_stage_gets_a_human_label(self):
+        text = module.render(single_manifest())
+        self.assertIn("| 单阶段全量 | exploratory + template + other | 3 | 3 |", text)
+
+    def test_behavior_mode_labels_do_not_leak_into_single_stage(self):
+        """stage_plan=single 时标签取自 behavior 表，不能变成「A 学探索」。"""
+        text = module.render(single_manifest())
+        self.assertNotIn("A 学探索", text)
+
+
 if __name__ == "__main__":
     unittest.main()
