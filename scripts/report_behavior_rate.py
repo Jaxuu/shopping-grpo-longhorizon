@@ -139,6 +139,73 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+def action_names(row: dict) -> list[str]:
+    """按发生顺序返回动作名（``think`` 不算动作）。"""
+    return [
+        name
+        for name, _ in iter_actions(row)
+        if name not in NON_ACTION_TOOLS
+    ]
+
+
+#: 搜索结果返回后「下一步做什么」——这是真正决定行为的决策点。
+TRANSITION_LABELS = {
+    SEARCH_TOOL: "换词重搜",
+    OPEN_TOOL: "打开候选（通常第 1 个）",
+    PAGE_TOOL: "翻页",
+    "buy_now": "直接下单",
+    "finish_without_purchase": "放弃",
+    "prev_page": "退回列表",
+}
+
+
+def summarize_actions(rows: list[dict]) -> dict:
+    """动作级统计：每个工具被调用多少次，以及「搜索之后下一步」的分布。
+
+    为什么要单看这一层：行级配比（多少条轨迹含探索）和动作级配比（决策点上
+    翻页占多少）是**两个数**。模型学的是后者——它每一步只在「下一个 token 该是
+    哪个动作」上被监督。行级 40% 完全可以对应动作级 1%。
+    """
+    tool_counts: dict[str, int] = {}
+    transitions: dict[str, int] = {}
+    decision_points = 0
+    for row in rows:
+        names = action_names(row)
+        for name in names:
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+        for index, name in enumerate(names[:-1]):
+            if name != SEARCH_TOOL:
+                continue
+            decision_points += 1
+            follow = names[index + 1]
+            label = TRANSITION_LABELS.get(follow, follow)
+            transitions[label] = transitions.get(label, 0) + 1
+    return {
+        "tool_counts": tool_counts,
+        "transitions": transitions,
+        "decision_points": decision_points,
+    }
+
+
+def format_action_report(name: str, stats: dict) -> str:
+    total_calls = sum(stats["tool_counts"].values())
+    lines = [f"== {name} · 动作级"]
+    lines.append(f"总动作 {total_calls} 次；决策点（搜索结果返回后）{stats['decision_points']} 个")
+    lines.append("")
+    lines.append("| 工具 | 次数 | 占全部动作 |")
+    lines.append("|---|---:|---:|")
+    for tool, value in sorted(stats["tool_counts"].items(), key=lambda kv: -kv[1]):
+        lines.append(f"| {tool} | {value} | {rate(value, total_calls) * 100:.1f}% |")
+    lines.append("")
+    lines.append("| 搜索之后的下一步 | 次数 | 占决策点 |")
+    lines.append("|---|---:|---:|")
+    for label, value in sorted(stats["transitions"].items(), key=lambda kv: -kv[1]):
+        lines.append(
+            f"| {label} | {value} | {rate(value, stats['decision_points']) * 100:.1f}% |"
+        )
+    return "\n".join(lines)
+
+
 def rate(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
 
@@ -186,6 +253,11 @@ def main(argv=None) -> int:
     parser.add_argument("paths", type=Path, nargs="+", help="轨迹 jsonl（评测或 SFT 池）")
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument(
+        "--actions",
+        action="store_true",
+        help="额外打印动作级明细：各工具调用次数、搜索后下一步的分布",
+    )
+    parser.add_argument(
         "--expect",
         type=int,
         default=0,
@@ -194,6 +266,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     results: dict[str, dict] = {}
+    actions: dict[str, dict] = {}
     for path in args.paths:
         if not path.exists():
             print(f"找不到 {path}", file=sys.stderr)
@@ -203,9 +276,13 @@ def main(argv=None) -> int:
             print(f"{path} 是空的", file=sys.stderr)
             return 1
         results[str(path)] = summarize(rows)
+        actions[str(path)] = summarize_actions(rows)
 
     if args.as_json:
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        payload = {
+            name: {**stats, "actions": actions[name]} for name, stats in results.items()
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     first = results[str(args.paths[0])]
@@ -213,6 +290,9 @@ def main(argv=None) -> int:
         if index:
             print()
         print(format_report(name, stats))
+        if args.actions:
+            print()
+            print(format_action_report(name, actions[name]))
 
     if args.expect:
         actual = first["trajectories"]
@@ -235,6 +315,19 @@ def main(argv=None) -> int:
             for stats in results.values():
                 cells.append(f"{rate(stats[key], stats['trajectories']) * 100:.1f}%")
             print(f"| {key} | " + " | ".join(cells) + " |")
+        # 动作级：搜索之后「翻页」占多少个决策点。行级配比可以很高而这里是 1%。
+        cells = []
+        for stats in actions.values():
+            points = stats["decision_points"]
+            pages = stats["transitions"].get("翻页", 0)
+            cells.append(f"{rate(pages, points) * 100:.1f}%")
+        print("| **决策点上翻页** | " + " | ".join(cells) + " |")
+        cells = []
+        for stats in actions.values():
+            points = stats["decision_points"]
+            opens = stats["transitions"].get("打开候选（通常第 1 个）", 0)
+            cells.append(f"{rate(opens, points) * 100:.1f}%")
+        print("| 决策点上打开候选 | " + " | ".join(cells) + " |")
     return 0
 
 

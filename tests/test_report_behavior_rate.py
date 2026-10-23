@@ -5,7 +5,12 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from scripts.report_behavior_rate import main, profile_row, summarize
+from scripts.report_behavior_rate import (
+    main,
+    profile_row,
+    summarize,
+    summarize_actions,
+)
 
 
 def eval_row(task_id: int, calls: list[tuple[str, dict]]) -> dict:
@@ -132,6 +137,25 @@ class BehaviorRateTest(unittest.TestCase):
         self.assertEqual(stats["multi_open"], 1)
         self.assertEqual(stats["exploratory"], 2)
         self.assertEqual(stats["template"], 1)
+
+    def test_action_level_counts_the_decision_point(self):
+        """行级配比和动作级配比是两个数：模型学的是后者。"""
+        rows = [
+            eval_row(1, [("search_products", {"query": "a"}), ("open_product", {"asin": "A1"})]),
+            eval_row(
+                2,
+                [
+                    ("search_products", {"query": "b"}),
+                    ("next_page", {}),
+                    ("open_product", {"asin": "A2"}),
+                ],
+            ),
+        ]
+        stats = summarize_actions(rows)
+        self.assertEqual(stats["decision_points"], 2)
+        self.assertEqual(stats["transitions"]["翻页"], 1)
+        self.assertEqual(stats["transitions"]["打开候选（通常第 1 个）"], 1)
+        self.assertEqual(stats["tool_counts"]["next_page"], 1)
 
     def test_expect_mismatch_is_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

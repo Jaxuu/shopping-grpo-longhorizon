@@ -292,7 +292,7 @@ step_eval() {
   # 而不是留一个空目录让人猜。report 自己会判断缺什么。
   launch m10r-eval \
     "MIN_OPENED_BEFORE_BUY=0 MODEL='${MODEL}' LABEL='${LABEL}' \
-     bash scripts/run_eval_m9.sh; bash scripts/run_m10r_pipeline.sh report"
+     bash scripts/run_eval_m9.sh; LABEL='${LABEL}' bash scripts/run_m10r_pipeline.sh report"
   echo "[提示] 自带商店环境（tmux env）+ vLLM（tmux vllm）；vLLM 首次加载 20–25 分钟。"
   echo "       评测完会自动打印分数与探索率（M10-R 的验收判据）。"
 }
