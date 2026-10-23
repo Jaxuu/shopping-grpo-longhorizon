@@ -11,6 +11,7 @@
 #   bash scripts/run_m10r_pipeline.sh build    # 1. 建池（纯 CPU，约 2 分钟）
 #   bash scripts/run_m10r_pipeline.sh train    # 2. 训练（要显卡，约 3.5–4 小时；被关机打断后再执行一次即续跑）
 #   bash scripts/run_m10r_pipeline.sh eval     # 3. Final-200（自带商店环境 + vLLM，40–60 分钟）
+#   bash scripts/run_m10r_pipeline.sh report   # 4. 分数 + 探索率（M10-R 的两条验收判据）
 #   bash scripts/run_m10r_pipeline.sh status   # 随时看：会话活着吗、跑到哪、显存多少
 #
 # 会话名：m10r-env / m10r-build / m10r-train / m10r-eval
@@ -287,10 +288,47 @@ step_eval() {
   fi
   # MIN_OPENED_BEFORE_BUY 默认是 3（强制多开的诊断开关），Final-200 必须关掉，
   # 否则测出来的不是真实水平。
+  # 评测后用 ';' 接 report：即使评测半途失败，也要把已有的产物摊开给人看，
+  # 而不是留一个空目录让人猜。report 自己会判断缺什么。
   launch m10r-eval \
     "MIN_OPENED_BEFORE_BUY=0 MODEL='${MODEL}' LABEL='${LABEL}' \
-     bash scripts/run_eval_m9.sh"
+     bash scripts/run_eval_m9.sh; bash scripts/run_m10r_pipeline.sh report"
   echo "[提示] 自带商店环境（tmux env）+ vLLM（tmux vllm）；vLLM 首次加载 20–25 分钟。"
+  echo "       评测完会自动打印分数与探索率（M10-R 的验收判据）。"
+}
+
+# ---------------------------------------------------------------- report
+# M10-R 的验收不是「分数涨」一条，而是「探索率抬起来 + 分数没掉」。两条都要看：
+#   探索率没抬 ⇒ SFT 没起作用（只是没伤到原有能力）
+#   分数掉了   ⇒ 抬过头或示范质量差
+step_report() {
+  local eval_dir="${ROOT}/outputs/evaluation/${LABEL}"
+  local summary="${eval_dir}/summary.json"
+  if [[ ! -f "${summary}" ]]; then
+    echo "没有 ${summary}：评测还没跑完或失败了。" >&2
+    echo "看：tail -30 outputs/logs/m10r-eval.log" >&2
+    return 1
+  fi
+  "${PY}" - "${summary}" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+done = int(data.get("strict_successes") or 0)
+total = int(data.get("expected_tasks") or 0)
+rate = float(data.get("strict_success_rate") or 0.0)
+baseline = 0.62
+print("== Final-200")
+print(f"严格成功 {done}/{total} = {rate * 100:.1f}%")
+print(f"基线（M5-B / M6 champion）62.0% = 124/200")
+delta = (rate - baseline) * 100
+print(f"差值 {delta:+.1f} 个百分点")
+PY
+  echo
+  # 对照池可能不存在（比如本地没建池），缺了就只报评测集，不要让报告整个失败。
+  local inputs=("${eval_dir}/trajectories.jsonl")
+  [[ -f "${CAPPED}/all.jsonl" ]] && inputs+=("${CAPPED}/all.jsonl")
+  [[ -f "${ROOT}/data/sft_pure_v4/all.jsonl" ]] && inputs+=("${ROOT}/data/sft_pure_v4/all.jsonl")
+  "${PY}" scripts/report_behavior_rate.py "${inputs[@]}" --expect 200
 }
 
 # ---------------------------------------------------------------- status
@@ -356,6 +394,7 @@ case "${1:-status}" in
   build)  step_build ;;
   train)  step_train ;;
   eval)   step_eval ;;
+  report) step_report ;;
   status) step_status ;;
   *)
     sed -n '2,25p' "$0" >&2
