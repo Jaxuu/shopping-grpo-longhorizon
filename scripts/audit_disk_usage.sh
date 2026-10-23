@@ -110,8 +110,16 @@ report() {
   fi
 }
 
-echo "== 磁盘"
-df -h . | tail -1
+show_fs() {
+  local label="$1" path="$2"
+  [[ -e "${path}" ]] || return 0
+  printf '%-24s %s\n' "${label}" "$(df -h "${path}" 2>/dev/null | tail -1)"
+}
+
+echo "== 磁盘（分别看，因为 outputs 常常是软链到另一块盘）"
+show_fs "仓库（代码 + .venv）" .
+show_fs "outputs（权重/评测）" outputs
+show_fs "data（池子）" data
 echo
 echo "== 占用明细（只展开大目录）"
 echo "   大小        路径                                                 处理"
@@ -158,6 +166,14 @@ for path in "${CANDIDATES[@]}"; do
   echo "  ${path#"${ROOT}/"}"
 done
 
+echo
+echo "== 大头（不能删，列出来是为了知道空间都去哪了）"
+for p in "${PROTECT[@]}"; do
+  [[ -e "${p}" ]] || continue
+  mb="$(size_mb "${p}")"
+  [[ -n "${mb}" ]] && (( mb >= 500 )) && printf '%7s MB  %s\n' "${mb}" "${p}"
+done
+
 if (( DELETE == 0 )); then
   echo
   echo "以上只是清单，什么都没删。确认无误后执行："
@@ -177,4 +193,4 @@ for path in "${CANDIDATES[@]}"; do
   rm -rf -- "${path}"
 done
 echo
-df -h . | tail -1
+show_fs "outputs（删除后）" outputs
