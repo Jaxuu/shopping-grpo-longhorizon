@@ -71,6 +71,7 @@ def summarize(rows: list[dict]) -> dict:
             "partial": types.count(PARTIAL),
             "wrong": types.count(WRONG),
             "mean_steps": sum(len(names) for _, names in items) / total,
+            "task_ids": [int(row.get("task_id") or 0) for row, _ in items],
             "chain": {
                 action: sum(1 for _, names in items if action in names) for action in CHAIN_ACTIONS
             },
@@ -78,7 +79,11 @@ def summarize(rows: list[dict]) -> dict:
     return result
 
 
-def format_report(name: str, stats: dict) -> str:
+def gold_task_ids(rows: list[dict]) -> set[int]:
+    return {int(row.get("task_id") or 0) for row in rows if reward_type(row) == GOLD}
+
+
+def format_report(name: str, stats: dict, paired: dict | None = None) -> str:
     lines = [f"== {name}"]
     lines.append("| 分组 | 题数 | 买对(gold) | 部分满足 | 买错 | 平均工具步 |")
     lines.append("|---|---:|---:|---:|---:|---:|")
@@ -104,14 +109,48 @@ def format_report(name: str, stats: dict) -> str:
             count = item["chain"][action]
             cells.append(f"{count}/{item['tasks']}（{count / item['tasks'] * 100:.0f}%）")
         lines.append(f"| {action} | " + " | ".join(cells) + " |")
+
+    if paired is not None:
+        lines.append("")
+        lines.append(f"| 同一批题在对照文件（{paired['name']}）里 | 题数 | 买对 | 买对率 |")
+        lines.append("|---|---:|---:|---:|")
+        for key in ("翻页", "没翻页"):
+            if key not in stats:
+                continue
+            ids = stats[key]["task_ids"]
+            hits = sum(1 for task_id in ids if task_id in paired["gold"])
+            lines.append(
+                f"| {key} | {len(ids)} | {hits} | {hits / len(ids) * 100:.1f}% |"
+            )
+        lines.append("")
+        lines.append(
+            "翻页组在对照文件里能拿高分 ⇒ 这批题本身不难，是翻页把它们做坏的；"
+            "对照文件也做不出来 ⇒ 这批题本来就难，翻页只是被分配到难题。"
+        )
     return "\n".join(lines)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", type=Path, nargs="+", help="评测 trajectories.jsonl")
+    parser.add_argument(
+        "--paired",
+        type=Path,
+        default=None,
+        help="对照文件（通常是分数更高的那次评测）：用同一批题看翻页组是不是被难题拖累",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
+
+    paired = None
+    if args.paired is not None:
+        if not args.paired.exists():
+            print(f"找不到 {args.paired}", file=sys.stderr)
+            return 1
+        paired = {
+            "name": args.paired.parent.name or str(args.paired),
+            "gold": gold_task_ids(load_jsonl(args.paired)),
+        }
 
     for path in args.paths:
         if not path.exists():
@@ -122,7 +161,7 @@ def main(argv=None) -> int:
         if args.as_json:
             print(json.dumps({str(path): stats}, ensure_ascii=False, indent=2))
         else:
-            print(format_report(str(path), stats))
+            print(format_report(str(path), stats, paired))
             print()
     return 0
 

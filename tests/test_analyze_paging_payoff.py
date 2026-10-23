@@ -5,7 +5,12 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from scripts.analyze_paging_payoff import main, summarize
+from scripts.analyze_paging_payoff import (
+    format_report,
+    gold_task_ids,
+    main,
+    summarize,
+)
 
 
 def row(task_id, calls, reward_type):
@@ -71,6 +76,21 @@ class PagingPayoffTest(unittest.TestCase):
             with redirect_stdout(buffer):
                 self.assertEqual(main([str(path)]), 0)
             self.assertIn("没翻页", buffer.getvalue())
+
+    def test_paired_answers_whether_paging_tasks_were_simply_hard(self):
+        """翻页组在同一批题上能被对照文件做对 ⇒ 不是难题，是翻页做坏的。"""
+        rows = [
+            row(1, [("search_products", {"query": "a"}), ("next_page", {})], "wrong_purchase"),
+            row(2, [("search_products", {"query": "b"})], "gold_purchase"),
+        ]
+        baseline = [
+            row(1, [("search_products", {"query": "a"})], "gold_purchase"),
+            row(2, [("search_products", {"query": "b"})], "gold_purchase"),
+        ]
+        paired = {"name": "baseline", "gold": gold_task_ids(baseline)}
+        text = format_report("x", summarize(rows), paired)
+        # 翻页组只有 1 题（task 1），对照文件里它是 gold ⇒ 100%
+        self.assertIn("| 翻页 | 1 | 1 | 100.0% |", text)
 
 
 if __name__ == "__main__":
