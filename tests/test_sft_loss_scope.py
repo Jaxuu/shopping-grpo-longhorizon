@@ -293,5 +293,91 @@ class SftLossScopeTest(unittest.TestCase):
         self.assertEqual(implicit["labels"], explicit["labels"])
 
 
+class MessageLevelLossScopeTest(unittest.TestCase):
+    """M10-R v3：单条轨迹里逐回合覆盖口径。
+
+    为什么需要它：补进翻页轨迹的「理由」写在 assistant 的 content 里，而
+    tool-call-only 恰好把 content 掩掉 —— 不覆盖口径的话，补思考等于白补。
+    但全局切到 assistant 又被 M5-A 实测证伪（59% vs 62%），所以只让那 144 条
+    翻页轨迹打开，其余 1,066 条保持原配方。
+    """
+
+    def _tagged(self):
+        messages = _messages()
+        for message in messages:
+            if message.get("role") == "assistant":
+                message["loss_scope"] = "assistant"
+        return messages
+
+    def test_message_scope_overrides_global_tool_call_only(self):
+        example = build_supervised_example(
+            messages=self._tagged(),
+            tools=[],
+            tokenizer=QwenLikeTokenizer(),
+            max_length=10_000,
+            loss_scope="tool-call-only",
+        )
+
+        labeled = _labeled_text(example)
+        self.assertIn("先搜索一下候选商品", labeled)
+        self.assertIn("确认价格与库存后下单", labeled)
+        self.assertIn("buy_now", labeled)
+
+    def test_untagged_turns_keep_the_global_scope(self):
+        """只有被标记的回合放开 content；其余回合仍按 tool-call-only 掩掉。"""
+        messages = _messages()
+        messages[2]["loss_scope"] = "assistant"  # 只标第一步搜索
+
+        example = build_supervised_example(
+            messages=messages,
+            tools=[],
+            tokenizer=QwenLikeTokenizer(),
+            max_length=10_000,
+            loss_scope="tool-call-only",
+        )
+
+        labeled = _labeled_text(example)
+        self.assertIn("先搜索一下候选商品", labeled)
+        self.assertNotIn("确认价格与库存后下单", labeled)
+        self.assertIn("buy_now", labeled)
+
+    def test_message_scope_is_not_leaked_into_the_rendered_text(self):
+        """``loss_scope`` 是训练期字段，绝不能出现在喂给 chat template 的文本里。"""
+        example = build_supervised_example(
+            messages=self._tagged(),
+            tools=[],
+            tokenizer=QwenLikeTokenizer(),
+            max_length=10_000,
+            loss_scope="tool-call-only",
+        )
+
+        self.assertNotIn("loss_scope", _labeled_text(example))
+
+    def test_invalid_message_scope_is_rejected(self):
+        messages = _messages()
+        messages[2]["loss_scope"] = "content-only"
+
+        with self.assertRaisesRegex(ValueError, "loss_scope"):
+            build_supervised_example(
+                messages=messages,
+                tools=[],
+                tokenizer=QwenLikeTokenizer(),
+                max_length=10_000,
+                loss_scope="tool-call-only",
+            )
+
+    def test_caller_messages_are_not_mutated(self):
+        messages = self._tagged()
+        build_supervised_example(
+            messages=messages,
+            tools=[],
+            tokenizer=QwenLikeTokenizer(),
+            max_length=10_000,
+            loss_scope="tool-call-only",
+        )
+
+        self.assertEqual(messages[2]["loss_scope"], "assistant")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

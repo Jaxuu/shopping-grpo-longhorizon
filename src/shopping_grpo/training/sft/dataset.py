@@ -129,6 +129,18 @@ def build_supervised_example(
     rendered_messages = normalize_messages_for_chat_template(messages)
     if rendered_messages is None:
         return None
+    # 逐回合口径（M10-R v3）：轨迹里可以给单个 assistant 回合标 ``loss_scope``，
+    # 覆盖全局口径。用途是「只给翻页轨迹的每个回合打开完整监督」——那 144 条示范
+    # 带老师写的理由，而其余 1,066 条继续走 M5-B 的 tool-call-only（62% 配方）。
+    # 必须在渲染前摘掉这个非标准字段，否则会被原样喂给 chat template。
+    message_scopes = []
+    for message in rendered_messages:
+        scope = message.pop("loss_scope", None)
+        if scope is not None and scope not in LOSS_SCOPES:
+            raise ValueError(
+                f"message loss_scope must be one of {LOSS_SCOPES}, got {scope!r}"
+            )
+        message_scopes.append(scope)
     assistant_indices = [
         index
         for index, message in enumerate(rendered_messages)
@@ -180,7 +192,9 @@ def build_supervised_example(
         if input_ids[:end] != through_assistant_ids:
             return None
 
-        if loss_scope == "assistant":
+        # 回合级口径优先于全局口径。
+        scope = message_scopes[index] or loss_scope
+        if scope == "assistant":
             span_start, span_end = start, end
         else:
             span = _tool_call_span(

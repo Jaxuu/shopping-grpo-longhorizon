@@ -25,6 +25,12 @@
 #   MODEL=...              评测权重（默认取 manifest 最后一个阶段的 merged）
 #   SAVE_STEPS=25          训练每 25 步存一次 checkpoint（定时关机时的中断粒度）
 #   AUTO_EVAL=1            训练成功后自动接着跑 Final-200（无人值守用这个）
+#   CAPPED_DIR=...         池子目录（默认 data/sft_m10r/capped）。v3 用 capped/v3，
+#                          **不复用 v2 目录**——否则续跑判定会把 v2 的 merged 当成
+#                          「这一段做完了」，直接跳过训练。
+#   MODEL_ROOT=...         模型输出目录（默认 outputs/models/sft-m10r）。同上，每轮一个。
+#   LOSS_SCOPE=...         全局监督口径（默认 tool-call-only = M5-B 的 62% 配方）。
+#                          轨迹里带 message 级 loss_scope 的回合会覆盖它（M10-R v3）。
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,8 +38,11 @@ cd "${ROOT}"
 
 PY="${PY:-${ROOT}/.venv/bin/python}"
 LOG_DIR="${ROOT}/outputs/logs"
-CAPPED="${ROOT}/data/sft_m10r/capped"
-MODEL_DIR="${ROOT}/outputs/models/sft-m10r"
+CAPPED="${CAPPED_DIR:-data/sft_m10r/capped}"
+MODEL_DIR="${MODEL_ROOT:-outputs/models/sft-m10r}"
+[[ "${CAPPED}" = /* ]] || CAPPED="${ROOT}/${CAPPED}"
+[[ "${MODEL_DIR}" = /* ]] || MODEL_DIR="${ROOT}/${MODEL_DIR}"
+LOSS_SCOPE="${LOSS_SCOPE:-tool-call-only}"
 LABEL="${LABEL:-m10r-final200}"
 # reverse（倒序两段）/ single（单阶段全量）。单阶段的最终产物是 stage-full/merged，
 # 所以下面的 MODEL 默认值不能写死 stage-b。
@@ -382,7 +391,9 @@ step_train() {
   # 直接把上一轮的结果目录覆盖掉。
   local chain=""
   if [[ "${AUTO_EVAL:-0}" == "1" ]]; then
-    chain=" && LABEL='${LABEL}' STAGE_PLAN='${STAGE_PLAN}' bash scripts/run_m10r_pipeline.sh eval"
+    # CAPPED_DIR / MODEL_ROOT 也必须内联，理由同下：否则评测会去默认目录找权重，
+    # 找不到就报错，找到了就是上一轮的旧权重——后者更糟（错分不报错）。
+    chain=" && LABEL='${LABEL}' STAGE_PLAN='${STAGE_PLAN}' CAPPED_DIR='${CAPPED}' MODEL_ROOT='${MODEL_DIR}' bash scripts/run_m10r_pipeline.sh eval"
   fi
   # expandable_segments 是历史踩坑的固定配置（碎片回收过 4.4 GiB），别省。
   # --liger-kernel 与 M5-B（62% 冠军）同一配方，也是 48 G 卡不 OOM 的前提。
@@ -392,7 +403,7 @@ step_train() {
        --source '${CAPPED}/all.jsonl' \
        --manifest '${CAPPED}/manifest.json' \
        --output-root '${MODEL_DIR}' \
-       --loss-scope tool-call-only \
+       --loss-scope ${LOSS_SCOPE} \
        --liger-kernel \
        --save-steps ${SAVE_STEPS} ${extra}${chain}"
   # 数字来自 scripts/estimate_sft_train_time.py（M5 同类 48 GB 卡三点实测外推），
