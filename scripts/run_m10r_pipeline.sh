@@ -477,6 +477,19 @@ step_report() {
     echo "看：tail -30 outputs/logs/m10r-eval.log" >&2
     return 1
   fi
+  # LABEL 默认值是 m10r-final200。新开一个 shell 手跑 report 时很容易漏传，
+  # 于是把上一轮的分数当成这一轮的报出来——2026-10-23 真踩：v2 评测跑完，
+  # report 读的是 m10r-final200（v1），把 63.0% 当成 v2 的成绩。
+  echo "== 评测目录：${eval_dir}"
+  local newer
+  newer="$(find "${ROOT}/outputs/evaluation" -maxdepth 2 -name summary.json \
+    -newer "${summary}" 2>/dev/null | head -3)"
+  if [[ -n "${newer}" ]]; then
+    echo "⚠️  有更新的评测结果，确认你没漏传 LABEL：" >&2
+    printf '     %s\n' ${newer} >&2
+    echo "     例：LABEL=m10r-v2 bash scripts/run_m10r_pipeline.sh report" >&2
+    echo >&2
+  fi
   "${PY}" - "${summary}" <<'PY'
 import json, sys
 path = sys.argv[1]
