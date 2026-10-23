@@ -491,6 +491,31 @@ PY
 }
 
 # ---------------------------------------------------------------- status
+# 「已结束」不等于成功。失败也会显示已结束——2026-10-23 真事故：单阶段训练的
+# argparse 直接退出码 2，status 显示 [已结束]、显存 0 MiB，被当成"跑完了"。
+# tmux 里拿不到退出码，所以按**各步骤的产物**判定。
+session_outcome() {
+  case "$1" in
+    m10r-env)
+      if [[ -x "${PY}" ]] && "${PY}" -c 'import liger_kernel' >/dev/null 2>&1; then
+        echo "成功"
+      else
+        echo "失败"
+      fi
+      ;;
+    m10r-build)
+      [[ -f "${CAPPED}/manifest.json" ]] && echo "成功" || echo "失败"
+      ;;
+    m10r-train)
+      [[ -f "${MODEL_DIR}/stage-${FINAL_STAGE}/merged/config.json" ]] && echo "成功" || echo "失败"
+      ;;
+    m10r-eval)
+      [[ -f "${ROOT}/outputs/evaluation/${LABEL}/summary.json" ]] && echo "成功" || echo "失败"
+      ;;
+    *) echo "" ;;
+  esac
+}
+
 step_status() {
   echo "== 会话"
   local any=0
@@ -500,7 +525,18 @@ step_status() {
         echo "  [跑着] ${name}"
         any=1
       else
-        echo "  [已结束] ${name}（会话留着看输出；关掉：tmux kill-session -t ${name}）"
+        case "$(session_outcome "${name}")" in
+          成功)
+            echo "  [已完成] ${name}（产物在；关掉：tmux kill-session -t ${name}）"
+            ;;
+          失败)
+            echo "  [失败/未完成] ${name} —— 不是跑完，是挂了。看日志："
+            echo "      tail -30 ${LOG_DIR}/${name}.log"
+            ;;
+          *)
+            echo "  [已结束] ${name}（会话留着看输出；关掉：tmux kill-session -t ${name}）"
+            ;;
+        esac
       fi
     fi
   done
@@ -540,10 +576,15 @@ step_status() {
     echo
     echo "== 模型目录"
     ls -1 "${MODEL_DIR}" 2>/dev/null | sed 's/^/  /'
-    for stage in a b; do
-      local ckpt
-      ckpt="$(latest_checkpoint "${stage}")"
-      [[ -n "${ckpt}" ]] && echo "  续跑点（stage-${stage}）：$(basename "${ckpt}")"
+    # 阶段名从 manifest 读：两段是 a b，单阶段是 full，不能写死。
+    local stage ckpt
+    for stage in $(stage_order || echo "a b"); do
+      if [[ -f "${MODEL_DIR}/stage-${stage}/merged/config.json" ]]; then
+        echo "  stage-${stage}：已完成（merged 在盘上）"
+      else
+        ckpt="$(latest_checkpoint "${stage}")"
+        [[ -n "${ckpt}" ]] && echo "  stage-${stage}：未完成，续跑点 $(basename "${ckpt}")"
+      fi
     done
   fi
 }
