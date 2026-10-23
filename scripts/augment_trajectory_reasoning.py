@@ -14,10 +14,14 @@ M10-R v2 的池子里，非翻页轨迹 89.1% 带思考，**翻页轨迹只有 1
 - 按 trajectory_id 断点续跑，重复执行不会重复花钱。
 
 用法：
+    export OPENAI_BASE_URL=https://api.deepseek.com/v1 OPENAI_API_KEY=sk-xxx
     python scripts/augment_trajectory_reasoning.py \
         --source data/sft_m10r/capped/all.jsonl \
         --output data/sft_m10r/capped/all_reasoned.jsonl \
         --paging-only --workers 8
+
+凭据只认老师模型的变量（``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``）。
+**不要**用 ``.env`` 里的 ``LLM_BASE_URL``：那是评测用的本地 vLLM。
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -170,6 +175,38 @@ def load_done(path: Path) -> set[str]:
     return done
 
 
+def _first_env(environ: dict, names: tuple[str, ...]) -> tuple[str | None, str | None]:
+    for name in names:
+        value = str(environ.get(name) or "").strip()
+        if value:
+            return value, name
+    return None, None
+
+
+def resolve_credentials(environ: dict | None = None) -> tuple[str | None, str | None, str]:
+    """取老师模型的地址与密钥，返回 ``(base_url, api_key, 来源说明)``。
+
+    优先 ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``——这是仓库里采集脚本
+    （``collect_sft_data.py``、``label_sft_difficulty.py``）的老师模型口径。
+
+    ``LLM_BASE_URL`` / ``LLM_API_KEY`` 只作兜底：``.env`` 里它们是**评测用**的本地
+    vLLM（``http://127.0.0.1:8000/v1``）。误用它补思考 = 让 2B 学生模型给自己的
+    轨迹写理由，数据会静默变废，所以调用方还要对本地地址再警告一次。
+    """
+    env = os.environ if environ is None else environ
+    base_url, base_src = _first_env(env, ("OPENAI_BASE_URL", "LLM_BASE_URL"))
+    api_key, key_src = _first_env(env, ("OPENAI_API_KEY", "LLM_API_KEY"))
+    return base_url, api_key, f"{base_src or '--base-url'}/{key_src or '--api-key'}"
+
+
+def looks_local(base_url: str | None) -> bool:
+    """地址是否指向本机（多半是评测用的 vLLM，而不是老师模型）。"""
+    if not base_url:
+        return False
+    host = base_url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return host in ("127.0.0.1", "localhost", "0.0.0.0", "::1")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", type=Path, required=True)
@@ -177,9 +214,12 @@ def main() -> int:
     parser.add_argument("--paging-only", action="store_true", help="只处理含 next_page 的轨迹")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--context-steps", type=int, default=3)
-    parser.add_argument("--model", default=os.environ.get("LLM_MODEL", "deepseek-v4-flash"))
-    parser.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL"))
-    parser.add_argument("--api-key", default=os.environ.get("LLM_API_KEY"))
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "deepseek-v4-flash",
+    )
+    parser.add_argument("--base-url", default=None, help="默认读 OPENAI_BASE_URL")
+    parser.add_argument("--api-key", default=None, help="默认读 OPENAI_API_KEY")
     parser.add_argument("--dry-run", action="store_true", help="只统计要补多少条，不调用模型")
     args = parser.parse_args()
 
@@ -197,8 +237,25 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    base_url, api_key, source = resolve_credentials()
+    args.base_url = args.base_url or base_url
+    args.api_key = args.api_key or api_key
     if not args.base_url or not args.api_key:
-        raise SystemExit("需要 --base-url/--api-key，或设置 LLM_BASE_URL/LLM_API_KEY")
+        raise SystemExit(
+            "需要老师模型的地址与密钥。任选一种：\n"
+            "  1) 传参：--base-url https://api.deepseek.com/v1 --api-key sk-xxx\n"
+            "  2) 导出环境变量：export OPENAI_BASE_URL=... OPENAI_API_KEY=...\n"
+            "     （若存在 ~/.m2_collect.env：set -a && source ~/.m2_collect.env && set +a）\n"
+            "注意别用 .env 里的 LLM_BASE_URL：那是评测用的本地 vLLM，不是老师模型。"
+        )
+    print(f"老师模型：{args.model} @ {args.base_url}（来源 {source}）")
+    if looks_local(args.base_url):
+        print(
+            f"[warn] {args.base_url} 是本地地址。补思考必须走老师模型；\n"
+            "       若这里接的是评测用的 vLLM，等于让 2B 学生模型给自己的轨迹写理由，\n"
+            "       数据会静默变废。确认无误再继续（Ctrl+C 退出）。",
+            file=sys.stderr,
+        )
 
     from shopping_grpo.evaluation.rollout import OpenAIChatClient
 

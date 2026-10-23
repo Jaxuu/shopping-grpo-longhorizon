@@ -6,7 +6,9 @@ from scripts.augment_trajectory_reasoning import (
     clean_reply,
     fill_reasons,
     has_paging,
+    looks_local,
     render_history,
+    resolve_credentials,
 )
 
 
@@ -116,6 +118,56 @@ class PromptTest(unittest.TestCase):
         text = render_history(recent, 2)
         self.assertIn("obs5", text)
         self.assertNotIn("obs2", text)
+
+
+class CredentialResolutionTest(unittest.TestCase):
+    """凭据口径：老师模型认 OPENAI_*，.env 里的 LLM_* 是评测用的本地 vLLM。
+
+    2026-10-24 实际踩到：脚本原先只读 LLM_*，用户设的是 OPENAI_*，
+    直接报「需要 --base-url/--api-key」卡住。更危险的是反向情形——
+    若 shell 里 source 过 .env，LLM_BASE_URL 指向 127.0.0.1:8000，
+    会拿 2B 学生模型给自己写理由，且不报任何错。
+    """
+
+    def test_prefers_openai_names(self):
+        base_url, api_key, source = resolve_credentials(
+            {
+                "OPENAI_BASE_URL": "https://api.deepseek.com/v1",
+                "OPENAI_API_KEY": "sk-teacher",
+                "LLM_BASE_URL": "http://127.0.0.1:8000/v1",
+                "LLM_API_KEY": "EMPTY",
+            }
+        )
+
+        self.assertEqual(base_url, "https://api.deepseek.com/v1")
+        self.assertEqual(api_key, "sk-teacher")
+        self.assertIn("OPENAI_BASE_URL", source)
+
+    def test_falls_back_to_llm_names(self):
+        base_url, api_key, source = resolve_credentials(
+            {"LLM_BASE_URL": "http://127.0.0.1:8000/v1", "LLM_API_KEY": "EMPTY"}
+        )
+
+        self.assertEqual(base_url, "http://127.0.0.1:8000/v1")
+        self.assertIn("LLM_BASE_URL", source)
+
+    def test_blank_values_are_treated_as_missing(self):
+        base_url, api_key, _ = resolve_credentials(
+            {"OPENAI_BASE_URL": "   ", "OPENAI_API_KEY": ""}
+        )
+
+        self.assertIsNone(base_url)
+        self.assertIsNone(api_key)
+
+    def test_detects_local_endpoints(self):
+        for url in (
+            "http://127.0.0.1:8000/v1",
+            "http://localhost:8000/v1",
+            "https://LOCALHOST/v1",
+        ):
+            self.assertTrue(looks_local(url), url)
+        for url in ("https://api.deepseek.com/v1", None):
+            self.assertFalse(looks_local(url), url)
 
 
 if __name__ == "__main__":
