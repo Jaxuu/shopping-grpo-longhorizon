@@ -106,7 +106,8 @@ class DetailTest(unittest.TestCase):
         item["purchased"] = "A1"
         item["first_page"] = ["A1", "A2", "B1"]
         text = format_detail([item], {"G": "耳机", "A1": "耳机", "A2": "耳机", "B1": "水杯"})
-        self.assertIn("该翻却没看到 gold 的 1 道", text)
+        self.assertIn("该翻页的 1 道", text)
+        self.assertIn("A1", text)
         self.assertIn("1/1 道的第一页里有同类商品", text)
 
     def test_detail_ignores_rows_that_never_needed_paging(self):
@@ -114,6 +115,13 @@ class DetailTest(unittest.TestCase):
         item["first_page"] = ["A1"]
         text = format_detail([item], {"A1": "耳机"})
         self.assertIn("0 道", text)
+
+    def test_detail_includes_rows_that_paged_far_enough(self):
+        # 翻到了的题也要列，否则没法对比「翻的」和「没翻的」第一页有何不同。
+        item = classify(_row(["search_products", "next_page", "buy_now"]), 30, PAGE)
+        item["first_page"] = ["A1"]
+        text = format_detail([item], {"A1": "耳机"})
+        self.assertIn("该翻页的 1 道", text)
 
 
 if __name__ == "__main__":

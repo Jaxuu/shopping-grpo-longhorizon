@@ -223,19 +223,22 @@ def format_detail(items: list[dict], domains: dict[str, str]) -> str:
     就只是没学会「列表为空该翻」这条规则。两者修法不同。
     """
 
-    targets = [i for i in items if i["group"] in ("needed_not_paged", "needed_paged_short")]
-    lines = [f"== 逐题明细：该翻却没看到 gold 的 {len(targets)} 道"]
-    lines.append("| task_id | gold 名次 | 需翻 | 实翻 | 买到 gold | 第一页同类 | 第一页条数 |")
+    targets = [
+        i
+        for i in items
+        if i["group"] in ("needed_reached", "needed_paged_short", "needed_not_paged")
+    ]
+    lines = [f"== 逐题明细：该翻页的 {len(targets)} 道（实翻 ≥ 需翻 = 翻到了）"]
+    lines.append("| task_id | gold 名次 | 需翻 | 实翻 | 买入 ASIN | 第一页同类 | 第一页条数 |")
     lines.append("|---|---:|---:|---:|---|---:|---:|")
     decoys = 0
     for item in targets:
         gold_domain = domains.get(item["gold"], "")
         same = sum(1 for asin in item["first_page"] if domains.get(asin) == gold_domain)
         decoys += int(same > 0)
-        bought = "是" if item["purchased"] == item["gold"] else "否"
         lines.append(
             f"| {item['task_id']} | {item['rank']} | {item['pages_needed']} | "
-            f"{item['pages']} | {bought} | {same} | {len(item['first_page'])} |"
+            f"{item['pages']} | {item['purchased'] or '-'} | {same} | {len(item['first_page'])} |"
         )
     if targets:
         lines.append("")
