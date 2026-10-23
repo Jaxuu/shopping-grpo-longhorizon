@@ -257,9 +257,12 @@ step_train() {
   [[ -n "${BASE_MODEL}" ]] && extra="${extra} --base-model '${BASE_MODEL}'"
   # AUTO_EVAL=1：训练跑完接着起评测。串在同一个 tmux 里用 &&，训练失败就不会去测
   # 一个半成品权重（那样只会浪费时间，还会让人误判成模型变差）。
+  # ⚠️ LABEL / STAGE_PLAN 必须**内联**进这条命令：tmux 新会话不保证继承调用者的
+  # 环境变量，不内联的话 LABEL=m10r-v2 会被默认值 m10r-final200 顶掉，
+  # 直接把上一轮的结果目录覆盖掉。
   local chain=""
   if [[ "${AUTO_EVAL:-0}" == "1" ]]; then
-    chain=" && bash scripts/run_m10r_pipeline.sh eval"
+    chain=" && LABEL='${LABEL}' STAGE_PLAN='${STAGE_PLAN}' bash scripts/run_m10r_pipeline.sh eval"
   fi
   # expandable_segments 是历史踩坑的固定配置（碎片回收过 4.4 GiB），别省。
   # --liger-kernel 与 M5-B（62% 冠军）同一配方，也是 48 G 卡不 OOM 的前提。
