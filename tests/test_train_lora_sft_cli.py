@@ -108,6 +108,51 @@ class TrainLoraSftCliTest(unittest.TestCase):
             self.assertEqual(_curriculum_task_ids(path, "b", "train"), {1, 3})
             self.assertEqual(_curriculum_task_ids(path, "b", "validation"), {2, 4})
 
+    def test_curriculum_stage_accepts_any_name_from_the_manifest(self):
+        """单阶段课程的阶段名是 ``full``，不能被 argparse 的 choices 挡掉。
+
+        2026-10-23 实测事故：``--curriculum-stage`` 曾写死 ``choices=("a","b","c")``，
+        单阶段训练一启动就以退出码 2 失败，日志里只有一句
+        ``returned non-zero exit status 2``，看起来像"跑完了"。
+        合法值本来就该由 manifest 的 stages 决定，不是由这个开关决定。
+        """
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "train_lora_sft.py",
+                "--model",
+                "/models/sft-b-curriculum/stage-c/merged",
+                "--train",
+                "data/sft_m10r/capped/all.jsonl",
+                "--output",
+                "outputs/models/sft-m10r/stage-full/adapter",
+                "--curriculum-manifest",
+                "data/sft_m10r/capped/manifest.json",
+                "--curriculum-stage",
+                "full",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.curriculum_stage, "full")
+
+    def test_unknown_curriculum_stage_reports_available_stages(self):
+        """阶段名打错时要直接说出清单里有哪些，而不是让人去翻 manifest。"""
+        manifest = {
+            "stages": {"full": {"buckets": ["exploratory"]}},
+            "buckets": {
+                "exploratory": {"train_task_ids": [1], "validation_task_ids": []},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaises(SystemExit) as caught:
+                _curriculum_task_ids(path, "b", "train")
+
+        self.assertIn("full", str(caught.exception))
+
     def test_defaults_are_suitable_for_small_qwen_lora_warmup(self):
         with patch.object(
             sys,

@@ -44,9 +44,13 @@ def parse_args():
     )
     parser.add_argument(
         "--curriculum-stage",
-        choices=("a", "b", "c"),
         default=None,
-        help="课程阶段；训练/验证都从同一 manifest 的累计 bucket 中读取。",
+        help=(
+            "课程阶段；训练/验证都从同一 manifest 的累计 bucket 中读取。"
+            "合法值由 manifest 的 stages 决定（三段课程是 a/b/c，单阶段是 full），"
+            "所以这里**不能写死 choices**——写死会让单阶段以退出码 2 直接失败。"
+            "阶段名不存在时由 _curriculum_task_ids 报错并列出可选值。"
+        ),
     )
     parser.add_argument("--output", type=Path, required=True, help="LoRA adapter 输出目录")
     # 24k 可保留当前真实轨迹的约 93%，48G 显存配合 batch=1 与梯度检查点可稳定训练。
@@ -134,7 +138,10 @@ def _curriculum_task_ids(path, stage, split):
             for task_id in manifest["buckets"][bucket_name][key]
         }
     except (KeyError, TypeError) as exc:
-        raise SystemExit(f"课程清单缺少阶段 {stage!r} 的 {split} task IDs") from exc
+        available = ", ".join(manifest.get("stages") or {}) or "（空）"
+        raise SystemExit(
+            f"课程清单缺少阶段 {stage!r} 的 {split} task IDs；清单里的阶段有：{available}"
+        ) from exc
 
 
 def _training_dependencies():
