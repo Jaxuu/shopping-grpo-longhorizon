@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,7 +49,7 @@ ACTION_LABELS = {
     "finish_without_purchase": "放弃购买",
 }
 
-PROMPT = """你在复现一条购物任务的轨迹，需要为其中一步补一句简短的中文说明。
+PROMPT = """你在复现一条购物任务的轨迹，需要为其中一步补一句简短的说明。
 
 【购物需求】
 {instruction}
@@ -59,10 +60,35 @@ PROMPT = """你在复现一条购物任务的轨迹，需要为其中一步补�
 【你这一步的决定】
 {action}
 
-请用**一句中文**（20–60 字）说明你为什么这么做。要求：
+请用**一句话**（30–60 字）说明你为什么这么做。要求：
+- {language_rule}
 - 必须引用页面里的具体信息（价格、规格、属性、排名、店铺），不要泛泛而谈；
 - 如果这一步是翻页，要说明这一页为什么不够（缺什么条件）；
-- 只输出这一句话，不要解释、不要加引号、不要输出其他内容。"""
+- 只输出这一句话，不要解释、不要加引号、不要换行、不要分点。"""
+
+# 语言口径必须和池子里原有轨迹一致，否则模型会学到「一到翻页情形就换语言」
+# 这个虚假相关。2026-10-24 实测：prompt 只写了「用中文」，老师仍然大段输出英文
+# （"I'll search for a replacement AC compressor..."），所以这里既写死规则，
+# 也在 ``usable_reason`` 里做硬校验 + 重试。
+LANGUAGE_RULES = {
+    "zh": "**必须用简体中文**：整句都是中文，商品名可保留原文，但不要出现英文句子；",
+    "en": "**必须用英文**（与池子里其它轨迹保持一致），不要出现中文句子；",
+}
+
+RETRY_HINT = (
+    "\n\n上一次的回答不合格（语言不对或太长）。请只输出**一句话**，严格遵守：\n"
+    "- 语言必须符合上面的要求；\n"
+    "- 不要换行、不要分点、不要引号、不要「理由：」这类前缀；\n"
+    "- 长度 30–60 字。"
+)
+
+# 理由上限。prompt 要 30–60 字，实测有 1,428 字的离谱样本（占满 max_tokens 后
+# 还带分点），会白白拉长训练序列，所以按句截断再硬切。
+MAX_REASON_CHARS = 120
+
+CJK = re.compile(r"[\u4e00-\u9fff]")
+LATIN_WORD = re.compile(r"[A-Za-z]{3,}")
+SENTENCE_END = re.compile(r"(?<=[。！？])")
 
 
 def action_text(tool_calls: list[dict]) -> str:
@@ -113,11 +139,20 @@ def render_history(recent: list[tuple[str, str]], limit: int) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(instruction: str, recent: list[tuple[str, str]], action: str, limit: int) -> str:
+def build_prompt(
+    instruction: str,
+    recent: list[tuple[str, str]],
+    action: str,
+    limit: int,
+    language: str = "zh",
+) -> str:
+    if language not in LANGUAGE_RULES:
+        raise ValueError(f"language must be one of {tuple(LANGUAGE_RULES)}, got {language!r}")
     return PROMPT.format(
         instruction=instruction.strip()[:1200],
         history=render_history(recent, limit),
         action=action,
+        language_rule=LANGUAGE_RULES[language],
     )
 
 
@@ -131,13 +166,76 @@ def clean_reply(text: str) -> str:
     return line.strip().strip('"“”「」').strip()
 
 
-def fill_reasons(row: dict, ask, context_steps: int = 3) -> tuple[dict, int]:
-    """给 content 为空的 assistant 回合补理由；返回 (row, 补了几条)。"""
+def trim_reason(text: str) -> str:
+    """截到第一句，再按 ``MAX_REASON_CHARS`` 硬切。
+
+    实测有 1,428 字、带分点的样本（老师没理会「一句话」的要求），
+    这种理由会把训练序列拉长却不多带信息，必须掐掉。
+    """
+
+    line = clean_reply(text)
+    first = SENTENCE_END.split(line, maxsplit=1)[0].strip()
+    if first:
+        line = first
+    if len(line) > MAX_REASON_CHARS:
+        line = line[:MAX_REASON_CHARS].rstrip("，,、；;：: ")
+    return line
+
+
+def usable_reason(text: str, language: str = "zh") -> bool:
+    """理由是否达标：长度够、语言对、不是纯填充句。
+
+    语言这一条是硬要求。prompt 里写「用中文」时老师仍会大段输出英文
+    （2026-10-24 实测 813 条里大部分是英文），不校验就会让「翻页情形 ⇒ 说英文」
+    变成一条虚假相关混进训练数据。
+    """
+
+    line = str(text or "").strip()
+    if len(line) < 8:
+        return False
+    has_cjk = bool(CJK.search(line))
+    has_latin = bool(LATIN_WORD.search(line))
+    if language == "zh":
+        return has_cjk
+    if language == "en":
+        return has_latin and not has_cjk
+    return True
+
+
+def ask_reason(ask, prompt: str, language: str = "zh", attempts: int = 3) -> tuple[str, bool]:
+    """问一次理由；不合格就带上更强硬的提示重问。返回 (理由, 是否达标)。
+
+    三次都不达标时返回**最好的一次**（第一次非空结果），而不是空串——
+    留空会让合并脚本报缺口、整批卡住；达标与否由调用方统计并打印，
+    让人知道有几条是兜底的。
+    """
+
+    fallback = ""
+    for attempt in range(max(1, attempts)):
+        reply = trim_reason(ask(prompt if attempt == 0 else prompt + RETRY_HINT))
+        if not reply:
+            continue
+        if not fallback:
+            fallback = reply
+        if usable_reason(reply, language):
+            return reply, True
+    return fallback, False
+
+
+def fill_reasons(
+    row: dict, ask, context_steps: int = 3, language: str = "zh"
+) -> tuple[dict, int, int]:
+    """给 content 为空的 assistant 回合补理由。
+
+    返回 ``(row, 补了几条, 其中兜底几条)``。兜底 = 重问三次仍不合格，
+    通常意味着该回合的页面信息太贫乏。
+    """
 
     instruction = instruction_of(row)
     recent: list[tuple[str, str]] = []
     last_observation = ""
     filled = 0
+    fallback = 0
     for message in row.get("messages") or []:
         role = message.get("role")
         if role == "tool":
@@ -151,13 +249,15 @@ def fill_reasons(row: dict, ask, context_steps: int = 3) -> tuple[dict, int]:
         action = action_text(tool_calls)
         existing = str(message.get("content") or "").strip()
         if not existing:
-            prompt = build_prompt(instruction, recent, action, context_steps)
-            reply = clean_reply(ask(prompt))
+            prompt = build_prompt(instruction, recent, action, context_steps, language)
+            reply, ok = ask_reason(ask, prompt, language)
             if reply:
                 message["content"] = reply
                 filled += 1
+                if not ok:
+                    fallback += 1
         recent.append((action, last_observation))
-    return row, filled
+    return row, filled, fallback
 
 
 def load_done(path: Path) -> set[str]:
@@ -220,6 +320,17 @@ def main() -> int:
     )
     parser.add_argument("--base-url", default=None, help="默认读 OPENAI_BASE_URL")
     parser.add_argument("--api-key", default=None, help="默认读 OPENAI_API_KEY")
+    parser.add_argument(
+        "--language",
+        choices=tuple(LANGUAGE_RULES),
+        default="zh",
+        help="理由语言，必须与池子里原有轨迹一致（默认 zh）",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略已有输出，全部重跑（换了 prompt 或语言口径后用这个）",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只统计要补多少条，不调用模型")
     args = parser.parse_args()
 
@@ -260,17 +371,22 @@ def main() -> int:
     from shopping_grpo.evaluation.rollout import OpenAIChatClient
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.force and args.output.is_file():
+        # 换 prompt / 换语言口径后必须重跑；直接截断，否则会按 trajectory_id 全跳过。
+        args.output.unlink()
+        print(f"[force] 已清空旧输出：{args.output}")
     done = load_done(args.output)
     todo = [r for r in targets if str(r.get("trajectory_id")) not in done]
-    print(f"已完成 {len(done)}，本次处理 {len(todo)}")
+    print(f"理由语言：{args.language}；已完成 {len(done)}，本次处理 {len(todo)}")
     if not todo:
         return 0
 
     lock = threading.Lock()
     total_filled = 0
+    total_fallback = 0
     with args.output.open("a", encoding="utf-8") as sink:
 
-        def work(row: dict) -> tuple[dict, int]:
+        def work(row: dict) -> tuple[dict, int, int]:
             client = OpenAIChatClient(
                 model=args.model,
                 base_url=args.base_url,
@@ -284,14 +400,14 @@ def main() -> int:
                 reply = client.complete([{"role": "user", "content": prompt}], [])
                 return str((reply or {}).get("content") or "")
 
-            return fill_reasons(row, ask, args.context_steps)
+            return fill_reasons(row, ask, args.context_steps, args.language)
 
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
             futures = {pool.submit(work, row): row for row in todo}
             for index, future in enumerate(as_completed(futures), start=1):
                 row = futures[future]
                 try:
-                    result, filled = future.result()
+                    result, filled, fallback = future.result()
                 except Exception as exc:  # 单条失败不该毁掉整批
                     print(f"[warn] {row.get('trajectory_id')}: {exc}")
                     continue
@@ -299,10 +415,19 @@ def main() -> int:
                     sink.write(json.dumps(result, ensure_ascii=False) + "\n")
                     sink.flush()
                     total_filled += filled
+                    total_fallback += fallback
                 if index % 20 == 0 or index == len(todo):
                     print(f"  进度 {index}/{len(todo)}，已补 {total_filled} 条理由")
 
     print(f"完成：补写 {total_filled} 条理由 → {args.output}")
+    if total_fallback:
+        # 兜底条数就是「重问三次仍不合格」的回合数。它们会进池子，但语言/长度可能
+        # 不合口径，所以必须显式报出来，而不是混在「813 条全部补上」里。
+        print(
+            f"[warn] 其中 {total_fallback} 条重问三次仍不合格（语言或长度），已按最好的一次保留；"
+            "\n       跑完用质量抽检命令看一眼这些是否要单独处理。",
+            file=sys.stderr,
+        )
     return 0
 
 

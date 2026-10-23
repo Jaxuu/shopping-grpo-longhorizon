@@ -1,6 +1,7 @@
 import unittest
 
 from scripts.augment_trajectory_reasoning import (
+    MAX_REASON_CHARS,
     action_text,
     build_prompt,
     clean_reply,
@@ -9,6 +10,8 @@ from scripts.augment_trajectory_reasoning import (
     looks_local,
     render_history,
     resolve_credentials,
+    trim_reason,
+    usable_reason,
 )
 
 
@@ -74,9 +77,10 @@ class FillReasonsTest(unittest.TestCase):
             prompts.append(prompt)
             return "理由：这一页都是 30ml，不符合 60ml 要求。"
 
-        result, filled = fill_reasons(row, ask)
+        result, filled, fallback = fill_reasons(row, ask)
         contents = [m["content"] for m in result["messages"] if m.get("role") == "assistant"]
         self.assertEqual(filled, 3)
+        self.assertEqual(fallback, 0)
         self.assertTrue(all(c == "这一页都是 30ml，不符合 60ml 要求。" for c in contents))
         self.assertEqual(len(prompts), 3)
 
@@ -88,7 +92,7 @@ class FillReasonsTest(unittest.TestCase):
             asked.append(prompt)
             return "补的理由"
 
-        result, filled = fill_reasons(row, ask)
+        result, filled, _ = fill_reasons(row, ask)
         assistant = [m for m in result["messages"] if m.get("role") == "assistant"]
         self.assertEqual(assistant[0]["content"], "老师原话：先搜一下。")
         self.assertEqual(filled, 2)
@@ -96,14 +100,55 @@ class FillReasonsTest(unittest.TestCase):
     def test_does_not_touch_tool_calls(self):
         row = _row()
         before = [m.get("tool_calls") for m in row["messages"] if m.get("role") == "assistant"]
-        result, _ = fill_reasons(row, lambda prompt: "理由")
+        result, _, _ = fill_reasons(row, lambda prompt: "理由")
         after = [m.get("tool_calls") for m in result["messages"] if m.get("role") == "assistant"]
         self.assertEqual(before, after)
 
     def test_empty_reply_leaves_turn_untouched(self):
         row = _row()
-        _, filled = fill_reasons(row, lambda prompt: "   ")
+        _, filled, _ = fill_reasons(row, lambda prompt: "   ")
         self.assertEqual(filled, 0)
+
+    def test_retries_when_reply_language_is_wrong(self):
+        """老师无视「用中文」时（2026-10-24 实测大面积发生）必须重问，而不是照收。"""
+        row = _row(assistant_contents=("", "", ""))
+        replies = iter(
+            [
+                "I'll search for a replacement AC compressor within the budget.",
+                "这一页只有 30ml，不符合 60ml 要求，翻下一页看看。",
+            ]
+        )
+        prompts = []
+
+        def ask(prompt):
+            prompts.append(prompt)
+            return next(replies, "这一页只有 30ml，不符合 60ml 要求，翻下一页看看。")
+
+        result, filled, fallback = fill_reasons(row, ask, language="zh")
+
+        self.assertEqual(filled, 3)
+        self.assertEqual(fallback, 0)
+        contents = [m["content"] for m in result["messages"] if m.get("role") == "assistant"]
+        self.assertTrue(all("这一页只有" in c for c in contents))
+        # 第一次问 + 重问一次，之后每条都直接合格。
+        self.assertEqual(len(prompts), 4)
+        self.assertIn("必须用简体中文", prompts[1])
+
+    def test_fallback_counts_turns_that_never_pass(self):
+        row = _row(assistant_contents=("", "", ""))
+        _, filled, fallback = fill_reasons(
+            row, lambda prompt: "I need to go back to search first.", language="zh"
+        )
+        self.assertEqual(filled, 3)
+        self.assertEqual(fallback, 3)
+
+    def test_english_mode_rejects_chinese(self):
+        row = _row(assistant_contents=("", "", ""))
+        _, filled, fallback = fill_reasons(
+            row, lambda prompt: "这一页都是 30ml，不符合要求。", language="en"
+        )
+        self.assertEqual(filled, 3)
+        self.assertEqual(fallback, 3)
 
 
 class PromptTest(unittest.TestCase):
@@ -118,6 +163,31 @@ class PromptTest(unittest.TestCase):
         text = render_history(recent, 2)
         self.assertIn("obs5", text)
         self.assertNotIn("obs2", text)
+
+
+class ReasonQualityTest(unittest.TestCase):
+    """截断与合格判定：老师会输出 1,428 字的多段文字，也会输出纯填充句。"""
+
+    def test_keeps_only_the_first_sentence(self):
+        text = trim_reason("这一页只有 30ml。另外价格 89 元也超预算。再翻一页看看。")
+        self.assertEqual(text, "这一页只有 30ml。")
+
+    def test_caps_overlong_reason(self):
+        text = trim_reason("价" * (MAX_REASON_CHARS + 200))
+        self.assertEqual(len(text), MAX_REASON_CHARS)
+
+    def test_strips_prefix_and_quotes_before_trimming(self):
+        self.assertEqual(trim_reason('理由：“这一页都是 30ml，不符合 60ml。”'), "这一页都是 30ml，不符合 60ml。")
+
+    def test_rejects_filler_and_too_short(self):
+        self.assertFalse(usable_reason("I need to go back to search first.", "zh"))
+        self.assertFalse(usable_reason("翻页。", "zh"))
+        self.assertTrue(usable_reason("这一页只有 30ml，不符合 60ml 要求。", "zh"))
+
+    def test_zh_rejects_pure_english(self):
+        self.assertFalse(
+            usable_reason("Page 2 has no relevant compressor either.", "zh")
+        )
 
 
 class CredentialResolutionTest(unittest.TestCase):
