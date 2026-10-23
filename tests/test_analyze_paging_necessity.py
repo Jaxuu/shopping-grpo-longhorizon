@@ -2,6 +2,7 @@ import unittest
 
 from scripts.analyze_paging_necessity import (
     classify,
+    format_detail,
     format_report,
     pages_needed,
     rank_band,
@@ -96,6 +97,23 @@ class SummarizeTest(unittest.TestCase):
         text = format_report("demo", summarize(items, PAGE))
         self.assertIn("该翻页的题 2 道：翻到 1、页数不够 0、完全没翻 1", text)
         self.assertIn("白翻", text)
+
+
+class DetailTest(unittest.TestCase):
+    def test_detail_counts_same_category_decoys_on_the_first_page(self):
+        item = classify(_row(["search_products", "buy_now"]), 87, PAGE)
+        item["gold"] = "G"
+        item["purchased"] = "A1"
+        item["first_page"] = ["A1", "A2", "B1"]
+        text = format_detail([item], {"G": "耳机", "A1": "耳机", "A2": "耳机", "B1": "水杯"})
+        self.assertIn("该翻却没看到 gold 的 1 道", text)
+        self.assertIn("1/1 道的第一页里有同类商品", text)
+
+    def test_detail_ignores_rows_that_never_needed_paging(self):
+        item = classify(_row(["search_products", "buy_now"]), 5, PAGE)
+        item["first_page"] = ["A1"]
+        text = format_detail([item], {"A1": "耳机"})
+        self.assertIn("0 道", text)
 
 
 if __name__ == "__main__":

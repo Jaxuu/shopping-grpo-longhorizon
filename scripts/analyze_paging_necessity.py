@@ -30,20 +30,25 @@ from __future__ import annotations
 
 import argparse
 import collections
+import gzip
 import json
 import math
 from pathlib import Path
 
 try:
     from scripts.audit_retrieval_reachability import (
+        CORPUS,
         DEFAULT_INDEX,
+        SEARCH_ROW,
         load_index,
         load_rows,
         recall_rank,
     )
 except ModuleNotFoundError:  # 直接以脚本方式运行时 scripts/ 不在包路径上
     from audit_retrieval_reachability import (  # type: ignore[no-redef]
+        CORPUS,
         DEFAULT_INDEX,
+        SEARCH_ROW,
         load_index,
         load_rows,
         recall_rank,
@@ -76,6 +81,28 @@ def paged_pages(row: dict) -> int:
     return sum(1 for step in row.get("steps") or [] if step.get("tool_name") == "next_page")
 
 
+def first_page_asins(row: dict, page_size: int) -> list[str]:
+    """第一次搜索返回的列表里被渲染出来的那些 ASIN（默认前 20 名）。"""
+
+    for step in row.get("steps") or []:
+        if step.get("tool_name") == "search_products":
+            text = step.get("observation") or ""
+            return [match.group("asin") for match in SEARCH_ROW.finditer(text)][:page_size]
+    return []
+
+
+def load_domains(corpus: Path) -> dict[str, str]:
+    """asin → 品类。只用来回答「第一页里有没有同类商品」，不参与判定。"""
+
+    with gzip.open(corpus, "rt", encoding="utf-8") as handle:
+        products = json.load(handle)
+    return {
+        item.get("asin"): (item.get("domain_zh") or item.get("domain_en_short") or "")
+        for item in products
+        if item.get("asin")
+    }
+
+
 def bought_gold(row: dict) -> bool:
     detail = (row.get("terminal_result") or {}).get("reward_detail") or {}
     return detail.get("reward_type") == GOLD
@@ -94,7 +121,12 @@ def classify(row: dict, rank: int | None, page_size: int) -> dict:
         group = "needed_paged_short"
     else:
         group = "needed_not_paged"
+    terminal = row.get("terminal_result") or {}
     return {
+        "task_id": row.get("task_id"),
+        "gold": (terminal.get("goal") or {}).get("asin"),
+        "purchased": (terminal.get("purchase") or {}).get("asin"),
+        "first_page": first_page_asins(row, page_size),
         "rank": rank,
         "pages_needed": need,
         "pages": pages,
@@ -183,12 +215,44 @@ def format_report(name: str, stats: dict) -> str:
     return "\n".join(lines)
 
 
+def format_detail(items: list[dict], domains: dict[str, str]) -> str:
+    """逐题摊开「该翻却没看到 gold」的题，并数第一页里有几个同类商品。
+
+    同类商品数是关键：如果第一页摆着一堆「差不多但不完全对」的诱饵，
+    模型很可能买了诱饵而不是继续翻；如果第一页全是无关商品，那它不翻
+    就只是没学会「列表为空该翻」这条规则。两者修法不同。
+    """
+
+    targets = [i for i in items if i["group"] in ("needed_not_paged", "needed_paged_short")]
+    lines = [f"== 逐题明细：该翻却没看到 gold 的 {len(targets)} 道"]
+    lines.append("| task_id | gold 名次 | 需翻 | 实翻 | 买到 gold | 第一页同类 | 第一页条数 |")
+    lines.append("|---|---:|---:|---:|---|---:|---:|")
+    decoys = 0
+    for item in targets:
+        gold_domain = domains.get(item["gold"], "")
+        same = sum(1 for asin in item["first_page"] if domains.get(asin) == gold_domain)
+        decoys += int(same > 0)
+        bought = "是" if item["purchased"] == item["gold"] else "否"
+        lines.append(
+            f"| {item['task_id']} | {item['rank']} | {item['pages_needed']} | "
+            f"{item['pages']} | {bought} | {same} | {len(item['first_page'])} |"
+        )
+    if targets:
+        lines.append("")
+        lines.append(
+            f"其中 {decoys}/{len(targets)} 道的第一页里有同类商品"
+            f"（「差不多但不完全对」的诱饵）"
+        )
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("trajectories", type=Path, nargs="+")
     parser.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     parser.add_argument("--recall-depth", type=int, default=150)
     parser.add_argument("--page-size", type=int, default=20)
+    parser.add_argument("--detail", action="store_true", help="逐题打印该翻却没看到 gold 的题")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -206,13 +270,17 @@ def main() -> int:
             ]
             rank = recall_rank(searcher, [q for q in queries if q], gold, args.recall_depth) if gold else None
             items.append(classify(row, rank, args.page_size))
-        payload[path.name] = summarize(items, args.page_size)
+        payload[path.name] = (summarize(items, args.page_size), items)
 
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps({name: stats for name, (stats, _) in payload.items()}, ensure_ascii=False, indent=2))
         return 0
-    for name, stats in payload.items():
+    domains = load_domains(CORPUS) if args.detail else {}
+    for name, (stats, items) in payload.items():
         print(format_report(name, stats))
+        if args.detail:
+            print()
+            print(format_detail(items, domains))
         print()
     return 0
 
