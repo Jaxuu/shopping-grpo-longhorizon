@@ -44,6 +44,10 @@ MODEL_DIR="${MODEL_ROOT:-outputs/models/sft-m10r}"
 [[ "${MODEL_DIR}" = /* ]] || MODEL_DIR="${ROOT}/${MODEL_DIR}"
 LOSS_SCOPE="${LOSS_SCOPE:-tool-call-only}"
 LABEL="${LABEL:-m10r-final200}"
+# vLLM 的显存预留比例（默认 0.9）。2B 模型权重只有 ~4.2 GB，显存看着被吃满是
+# 因为 vLLM 按这个比例预分配 KV cache —— 卡越大占越多，但不是必需。
+# 想在小卡上跑、或不想让评测把整张卡占住，就调小：GPU_MEM_UTIL=0.3
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.9}"
 # reverse（倒序两段）/ single（单阶段全量）。单阶段的最终产物是 stage-full/merged，
 # 所以下面的 MODEL 默认值不能写死 stage-b。
 STAGE_PLAN="${STAGE_PLAN:-reverse}"
@@ -470,7 +474,7 @@ step_eval() {
   # 评测后用 ';' 接 report：即使评测半途失败，也要把已有的产物摊开给人看，
   # 而不是留一个空目录让人猜。report 自己会判断缺什么。
   launch m10r-eval \
-    "MIN_OPENED_BEFORE_BUY=0 MODEL='${MODEL}' LABEL='${LABEL}' \
+    "GPU_MEM_UTIL='${GPU_MEM_UTIL}' MIN_OPENED_BEFORE_BUY=0 MODEL='${MODEL}' LABEL='${LABEL}' \
      bash scripts/run_eval_m9.sh; LABEL='${LABEL}' bash scripts/run_m10r_pipeline.sh report"
   echo "[提示] 自带商店环境（tmux env）+ vLLM（tmux vllm）；vLLM 首次加载 20–25 分钟。"
   echo "       评测完会自动打印分数与探索率（M10-R 的验收判据）。"
