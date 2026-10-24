@@ -230,16 +230,23 @@ def format_report(summary: Mapping[str, Any]) -> str:
 
     mismatch = summary["groups"]["product_mismatch"]
     if mismatch:
+        winnable = total - len(mismatch)
         lines += [
             f"## 1. 疑似无解（{len(mismatch)} 道）：买到 gold，但商品级维度对不上",
             "",
             *_detail_table(mismatch),
             "",
             f"**判读**：这 {len(mismatch)} 道题（{len(mismatch) / total:.1%}）无论策略多好都拿不到 "
-            "`gold_purchase`。扣掉它们，评测真实上限是 "
-            f"{(total - len(mismatch)) / total:.1%}；"
-            f"当前已达成上限的 {counts['solved'] / max(total - len(mismatch), 1):.1%}。",
-            "如果这个数不小，**下一步该修评测集，不是训模型**。",
+            "`gold_purchase`。",
+            "",
+            "为什么能下定论：评测的「严格成功」只认 `gold_purchase`，而它要求"
+            "「买到的 ASIN 等于 goal.asin」**且**「四个偏好维度全部满足」。"
+            "这 20 道题的 gold 商品本身品牌/型号就不满足题面要求 ⇒ "
+            "`all_satisfied` 永远为假 ⇒ 不存在任何能拿分的轨迹。",
+            "",
+            f"⇒ 评测真实上限是 **{winnable / total:.1%}**（{winnable}/{total}），不是 100%。"
+            f"**后续所有分数对比都应该按这个分母重算**，否则每一轮的 ±1pp 都在噪声里。",
+            "用 `--rescore` 可以把历史成绩一次性按可解题重算。",
             "",
         ]
     else:
@@ -278,10 +285,90 @@ def format_report(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def strict_success_ids(path: Path) -> set[str]:
+    """一个评测目录里严格成功的 task_id 集合。
+
+    优先读同目录的 `summary.json`（它落的 `strict_success_task_ids` 才是官方口径）；
+    没有就退回「按轨迹数 reward_type == gold_purchase」——两者在本仓库实测一致
+    （v2 的 127 与 summary 的 127 对得上）。
+    """
+    summary = path.parent / "summary.json"
+    if summary.is_file():
+        try:
+            data = json.loads(summary.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        ids = data.get("strict_success_task_ids")
+        if isinstance(ids, list):
+            return {str(item) for item in ids}
+    return {
+        record["task_id"]
+        for record in (extract(row) for row in load_rows(path))
+        if record["reward_type"] == GOLD
+    }
+
+
+def rescore(paths: Sequence[Path], unsolvable: set[str]) -> list[dict]:
+    """按「可解题」重算每个评测目录的分数。"""
+    rows = []
+    for path in paths:
+        records = [extract(row) for row in load_rows(path)]
+        tasks = {record["task_id"] for record in records}
+        if not tasks:
+            continue
+        solved = strict_success_ids(path) & tasks
+        winnable = tasks - unsolvable
+        rows.append(
+            {
+                "model": path.parent.name or path.name,
+                "tasks": len(tasks),
+                "raw": len(solved),
+                "raw_rate": len(solved) / len(tasks),
+                "winnable": len(winnable),
+                "adj": len(solved & winnable),
+                "adj_rate": len(solved & winnable) / len(winnable) if winnable else 0.0,
+            }
+        )
+    rows.sort(key=lambda row: -row["adj_rate"])
+    return rows
+
+
+def format_rescore(rows: Sequence[Mapping[str, Any]], unsolvable: set[str]) -> str:
+    lines = [
+        "# 按可解题重算历史成绩",
+        "",
+        f"分母剔除 {len(unsolvable)} 道已证明无解的题。"
+        "「原始」是当时的官方分数，「调整后」才是模型真实水平的可比口径。",
+        "",
+        "| 评测 | 原分数 | 可解题数 | 调整后 | 变化 |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        delta = (row["adj_rate"] - row["raw_rate"]) * 100
+        lines.append(
+            f"| {row['model']} | {row['raw']}/{row['tasks']} = {row['raw_rate']:.1%} | "
+            f"{row['winnable']} | {row['adj']}/{row['winnable']} = {row['adj_rate']:.1%} | "
+            f"{delta:+.1f}pp |"
+        )
+    if rows:
+        best = rows[0]
+        lines += [
+            "",
+            f"**最高**：{best['model']} —— 调整后 {best['adj_rate']:.1%}"
+            f"（原始 {best['raw_rate']:.1%}）。",
+        ]
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="审计哪些评测题从没被任何模型做对过")
     parser.add_argument("trajectories", type=Path, nargs="+", help="多个评测轨迹 jsonl")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
+    parser.add_argument(
+        "--rescore",
+        action="store_true",
+        help="额外按「剔除无解题」的口径重算所有评测目录的分数",
+    )
     args = parser.parse_args(argv)
 
     per_task, dirs = collect(args.trajectories)
@@ -291,6 +378,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
         print(format_report(summary))
+        if args.rescore:
+            unsolvable = {item["task_id"] for item in summary["groups"]["product_mismatch"]}
+            print()
+            print(format_rescore(rescore(args.trajectories, unsolvable), unsolvable))
     return 0
 
 

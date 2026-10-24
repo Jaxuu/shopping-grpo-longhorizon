@@ -10,6 +10,9 @@ from scripts.audit_unsolvable_tasks import (
     collect,
     extract,
     format_report,
+    format_rescore,
+    rescore,
+    strict_success_ids,
     summarize,
 )
 
@@ -114,7 +117,7 @@ def test_collect_merges_across_dirs(tmp: pathlib.Path) -> None:
                make_row("2", reward_type="gold_purchase", purchased="G")]),
     ):
         d = tmp / name
-        d.mkdir()
+        d.mkdir(exist_ok=True)
         (d / "trajectories.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
         )
@@ -134,7 +137,7 @@ def test_summary_counts_and_report(tmp: pathlib.Path) -> None:
                  dims={"brand": 0.0}),
     ]
     d = tmp / "m"
-    d.mkdir()
+    d.mkdir(exist_ok=True)
     (d / "trajectories.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in rows_a), encoding="utf-8"
     )
@@ -151,3 +154,57 @@ def test_summary_counts_and_report(tmp: pathlib.Path) -> None:
     assert "疑似无解" in text
     assert "可救" in text
     assert "task_id" in text
+
+
+def test_strict_success_ids_prefers_summary(tmp: pathlib.Path) -> None:
+    """有 summary.json 就用它落的官方口径。"""
+    d = tmp / "with-summary"
+    d.mkdir(exist_ok=True)
+    rows = [
+        make_row("1", reward_type="gold_purchase", purchased="G"),
+        make_row("2", reward_type="partial_alternative_purchase", purchased="G"),
+    ]
+    (d / "trajectories.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+    )
+    (d / "summary.json").write_text(
+        json.dumps({"strict_success_task_ids": ["1"], "strict_successes": 1}),
+        encoding="utf-8",
+    )
+    assert strict_success_ids(d / "trajectories.jsonl") == {"1"}
+
+
+def test_strict_success_ids_falls_back_to_reward_type(tmp: pathlib.Path) -> None:
+    d = tmp / "no-summary"
+    d.mkdir(exist_ok=True)
+    rows = [
+        make_row("1", reward_type="gold_purchase", purchased="G"),
+        make_row("2", reward_type="valid_alternative_purchase", purchased="Y"),
+    ]
+    (d / "trajectories.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+    )
+    # valid_alternative_purchase 不算严格成功
+    assert strict_success_ids(d / "trajectories.jsonl") == {"1"}
+
+
+def test_rescore_excludes_unsolvable_from_denominator(tmp: pathlib.Path) -> None:
+    d = tmp / "m"
+    d.mkdir(exist_ok=True)
+    rows = [
+        make_row("1", reward_type="gold_purchase", purchased="G"),
+        make_row("2", reward_type="partial_alternative_purchase", purchased="G"),
+        make_row("3", purchased="X"),
+    ]
+    (d / "trajectories.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+    )
+    out = rescore([d / "trajectories.jsonl"], {"2"})
+    assert len(out) == 1
+    row = out[0]
+    assert row["raw"] == 1 and row["tasks"] == 3
+    assert row["winnable"] == 2 and row["adj"] == 1
+    assert abs(row["adj_rate"] - 0.5) < 1e-9
+    text = format_rescore(out, {"2"})
+    assert "调整后" in text
+    assert "50.0%" in text
