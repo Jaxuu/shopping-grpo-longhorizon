@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from scripts.analyze_hard_pool_progress import (
+    coerce_uid,
     collect_groups,
     detect_uid_kind,
     group_stats,
@@ -50,9 +51,38 @@ def test_load_pool_ids_separates_hard_by_both_keys(tmp_path: Path) -> None:
 
 def test_detect_uid_kind_prefers_task_id_when_values_exceed_pool_size() -> None:
     hard_sets = {"task_id": {9000, 9001}, "index": {3, 4}}
-    assert detect_uid_kind([9000, 1, 9001], hard_sets, 5) == "task_id"
-    assert detect_uid_kind([3, 1, 4], hard_sets, 5) == "index"
-    assert detect_uid_kind(["a", "b"], hard_sets, 5) == "unknown"
+    kind, _ = detect_uid_kind([9000, 1, 9001], hard_sets, 5)
+    assert kind == "task_id"
+    kind, _ = detect_uid_kind([3, 1, 4], hard_sets, 5)
+    assert kind == "index"
+    kind, diag = detect_uid_kind(["a", "b"], hard_sets, 5)
+    assert kind == "unknown"
+    assert diag["uid_parsed"] == 0
+
+
+def test_detect_uid_kind_accepts_numeric_strings() -> None:
+    hard_sets = {"task_id": {9000, 9001}, "index": {3, 4}}
+    kind, diag = detect_uid_kind(["3", "1", "4"], hard_sets, 5)
+    assert kind == "index"
+    assert diag["match_index"] == 2
+
+
+def test_detect_uid_kind_refuses_low_match_rate() -> None:
+    """uid 是随机 uuid 数字时不该硬猜成某个口径。"""
+    hard_sets = {"task_id": {9000}, "index": {3}}
+    kind, diag = detect_uid_kind([70000, 80000, 90000], hard_sets, 5)
+    assert kind == "unknown"
+    assert diag["match_task_id"] == 0
+
+
+def test_coerce_uid_handles_int_string_and_singleton_list() -> None:
+    assert coerce_uid(7) == 7
+    assert coerce_uid("7") == 7
+    assert coerce_uid(7.0) == 7
+    assert coerce_uid([7]) == 7
+    assert coerce_uid("task_7") is None  # 不做「抠数字」这种猜测
+    assert coerce_uid(True) is None
+    assert coerce_uid([1, 2]) is None
 
 
 def test_group_stats_counts_any_success_and_utility() -> None:

@@ -30,11 +30,32 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 VAL_PREFIXES = ("val-core/", "val-aux/", "val/")
 VAL_PRIMARY = "val-core/shopsimulator/reward/mean@1"
+
+
+def coerce_uid(uid: object) -> int | None:
+    """把 uid 归一成整数。
+
+    veRL 的 uid 可能是 `int`、纯数字字符串，或 `[task_id, rollout_index]` 这类列表。
+    只接受**能无损解释为整数**的形式：不做「从字符串里抠数字」这种猜测，
+    否则 uuid 里的数字会被当成 task_id，静默算错。
+    """
+    if isinstance(uid, bool):
+        return None
+    if isinstance(uid, int):
+        return uid
+    if isinstance(uid, float):
+        return int(uid) if uid.is_integer() else None
+    if isinstance(uid, str):
+        text = uid.strip()
+        return int(text) if text.isdigit() else None
+    if isinstance(uid, (list, tuple)) and len(uid) == 1:
+        return coerce_uid(uid[0])
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,22 +123,46 @@ def load_pool_ids(pool: Path, hard: Path) -> tuple[dict[str, set], int]:
     return {"task_id": hard_by_task, "index": hard_by_index}, len(table)
 
 
-def detect_uid_kind(uids: list, hard_sets: dict[str, set], n_rows: int) -> str:
-    """判断诊断文件里的 uid 是 task_id 还是 index。
+def detect_uid_kind(uids: list, hard_sets: dict[str, set], n_rows: int) -> tuple[str, dict]:
+    """判断诊断文件里的 uid 是 task_id 还是 index，并给出匹配率。
 
     优先认 task_id：它的取值是语料行号，范围远大于池子行数，一旦出现 >n_rows 的值即可锁定。
+    匹配率低于 30% 时不硬猜，返回 unknown 让上层打印诊断信息。
     """
-    values = [uid for uid in uids if isinstance(uid, int) and not isinstance(uid, bool)]
-    if len(values) != len(uids) or not values:
-        return "unknown"
-    as_task = sum(1 for uid in values if uid in hard_sets["task_id"])
-    as_index = sum(1 for uid in values if uid in hard_sets["index"])
-    has_beyond = any(uid >= n_rows for uid in values)
-    if as_task > as_index or has_beyond:
-        return "task_id"
-    if as_index > 0:
-        return "index"
-    return "unknown"
+    coerced = [coerce_uid(uid) for uid in uids]
+    values = [value for value in coerced if value is not None]
+    diagnostics = {
+        "uid_total": len(uids),
+        "uid_parsed": len(values),
+        "uid_type_counts": {
+            str(kind): count
+            for kind, count in Counter(type(uid).__name__ for uid in uids).most_common()
+        },
+        "uid_samples": [repr(uid) for uid in uids[:8]],
+        "uid_value_range": (min(values), max(values)) if values else None,
+        "match_task_id": 0,
+        "match_index": 0,
+    }
+    if not values:
+        return "unknown", diagnostics
+
+    as_task = sum(1 for value in values if value in hard_sets["task_id"])
+    as_index = sum(1 for value in values if value in hard_sets["index"])
+    diagnostics["match_task_id"] = as_task
+    diagnostics["match_index"] = as_index
+    has_beyond = any(value >= n_rows for value in values)
+    if has_beyond or as_task > as_index:
+        kind = "task_id"
+        matched = as_task
+    elif as_index > 0:
+        kind = "index"
+        matched = as_index
+    else:
+        return "unknown", diagnostics
+    # 难题只占池子一半，抽到的组里难题应占 30%+；低于此说明口径猜错了
+    if matched / len(values) < 0.30:
+        return "unknown", diagnostics
+    return kind, diagnostics
 
 
 def summarize_val(records: list[dict]) -> list[dict]:
@@ -198,8 +243,8 @@ def split_by_hardness(
     for step in sorted(per_step):
         hard_groups, easy_groups, unknown = [], [], 0
         for group in per_step[step]:
-            uid = group.get("uid")
-            if not isinstance(uid, int) or isinstance(uid, bool):
+            uid = coerce_uid(group.get("uid"))
+            if uid is None:
                 unknown += 1
                 continue
             if uid in hard_set:
@@ -252,10 +297,24 @@ def render(summary: dict, args: argparse.Namespace) -> str:
         "",
     ]
     if summary["uid_kind"] == "unknown":
+        diag = summary.get("uid_diag") or {}
         lines += [
             "> ⚠️ 认不出 uid 是 task_id 还是 index，下面的难题/简单题拆分**不可信**。",
-            "> 先跑这一句看 uid 长什么样，再决定：",
-            "> `head -1 outputs/models/grpo-m10h/training_diagnostics.jsonl | python -c \"import json,sys; r=json.load(sys.stdin); print([g['uid'] for g in r['groups']][:8])\"`",
+            "",
+            "| 诊断项 | 值 |",
+            "|---|---|",
+            f"| 有 groups 的步数 | {summary.get('steps_with_groups')} |",
+            f"| 收集到的组总数 | {summary.get('group_records')} |",
+            f"| uid 样本 | {diag.get('uid_samples')} |",
+            f"| uid 类型分布 | {diag.get('uid_type_counts')} |",
+            f"| 能解析成整数的比例 | {diag.get('uid_parsed')}/{diag.get('uid_total')} |",
+            f"| 解析后的取值区间 | {diag.get('uid_value_range')} |",
+            f"| 命中难题 task_id 的次数 | {diag.get('match_task_id')} |",
+            f"| 命中难题 index 的次数 | {diag.get('match_index')} |",
+            f"| 池子行数 | {summary['pool_rows']} |",
+            "",
+            "> 把这整段发给我，我按真实口径改判据。若「收集到的组总数」是 0，"
+            "说明补丁没往诊断文件写 `groups`，那是另一回事。",
             "",
         ]
 
@@ -366,7 +425,7 @@ def main() -> int:
     all_uids = [
         group.get("uid") for groups in per_step.values() for group in groups
     ]
-    uid_kind = detect_uid_kind(all_uids, hard_sets, pool_rows)
+    uid_kind, uid_diag = detect_uid_kind(all_uids, hard_sets, pool_rows)
     hard_set = hard_sets.get(uid_kind, set())
 
     stats = split_by_hardness(per_step, hard_set, uid_kind) if uid_kind != "unknown" else {
@@ -379,7 +438,10 @@ def main() -> int:
                 group
                 for step in stats
                 for group in per_step[step]
-                if (isinstance(group.get("uid"), int) and (group["uid"] in hard_set) == (side == "hard"))
+                if (
+                    coerce_uid(group.get("uid")) is not None
+                    and (coerce_uid(group.get("uid")) in hard_set) == (side == "hard")
+                )
             ]
         )
         for side in ("hard", "easy")
@@ -396,6 +458,9 @@ def main() -> int:
         "pool_rows": pool_rows,
         "hard_count": len(hard_sets.get("task_id") or hard_sets.get("index") or ()),
         "uid_kind": uid_kind,
+        "uid_diag": uid_diag,
+        "group_records": sum(len(groups) for groups in per_step.values()),
+        "steps_with_groups": len(per_step),
         "val": summarize_val(records),
         "windows": window_rows(stats, args.window),
         "overall": overall,
