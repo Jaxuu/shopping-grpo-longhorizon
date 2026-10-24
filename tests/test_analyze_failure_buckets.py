@@ -54,23 +54,29 @@ def make_row(
     }
 
 
-def test_bucket_covers_four_failure_shapes() -> None:
+def test_bucket_covers_failure_shapes() -> None:
     ok = make_row("1", reward_type="gold_purchase", purchased="G")
     assert bucket(extract(ok)) == "success"
 
-    gate = make_row("2", purchased="G", budget_status="fail")
-    assert bucket(extract(gate)) == "bought_gold_gate_failed"
+    variant = make_row("2", reward_type="partial_alternative_purchase", purchased="G")
+    assert bucket(extract(variant)) == "bought_gold_wrong_variant"
 
-    other = make_row("3", purchased="X", opened=["G", "X"])
+    over = make_row("3", purchased="G", budget_status="fail")
+    assert bucket(extract(over)) == "bought_gold_over_budget"
+
+    other_gate = make_row("4", purchased="G", category_status="fail")
+    assert bucket(extract(other_gate)) == "bought_gold_other_gate"
+
+    other = make_row("5", purchased="X", opened=["G", "X"])
     assert bucket(extract(other)) == "saw_gold_bought_other"
 
-    none_bought = make_row("4", purchased=None, opened=["G"], buy=False)
+    none_bought = make_row("6", purchased=None, opened=["G"], buy=False)
     assert bucket(extract(none_bought)) == "saw_gold_no_purchase"
 
-    never = make_row("5", purchased="X", opened=["X", "Y"])
+    never = make_row("7", purchased="X", opened=["X", "Y"])
     assert bucket(extract(never)) == "never_saw_gold"
 
-    unknown = make_row("6", gold=None, purchased="X")
+    unknown = make_row("8", gold=None, purchased="X")
     assert bucket(extract(unknown)) == "unknown"
 
 
@@ -92,13 +98,29 @@ def test_summarize_counts_and_medians() -> None:
     assert summary["total"] == 4
     assert summary["successes"] == 1
     assert summary["rate"] == 0.25
-    assert summary["buckets"]["bought_gold_gate_failed"] == 1
+    assert summary["buckets"]["bought_gold_over_budget"] == 1
     assert summary["buckets"]["saw_gold_bought_other"] == 1
     assert summary["buckets"]["never_saw_gold"] == 1
     assert summary["buckets"]["saw_gold_no_purchase"] == 0
     assert summary["gates"]["budget:fail"] == 1
     # 失败轨迹打开数：1, 2, 3 → 中位数 2
     assert summary["fail_opened_median"] == 2
+    # 打开数分布：失败 1/2/3 各一道；成功 1 个
+    assert summary["opened_fail"] == {"0": 0, "1": 1, "2": 1, "3+": 1}
+    assert summary["opened_ok"] == {"0": 0, "1": 1, "2": 0, "3+": 0}
+
+
+def test_dimensions_split_by_bucket() -> None:
+    rows = [
+        make_row("1", reward_type="partial_alternative_purchase", purchased="G",
+                 dims={"capacity": 0.0}),
+        make_row("2", purchased="X", opened=["X"], dims={"capacity": 1.0}),
+    ]
+    summary = summarize([extract(r) for r in rows])
+    variant = summary["dims_by_bucket"]["bought_gold_wrong_variant"]
+    never = summary["dims_by_bucket"]["never_saw_gold"]
+    assert variant[0]["name"] == "capacity" and variant[0]["mean"] == 0.0
+    assert never[0]["mean"] == 1.0
 
 
 def test_dimension_rows_sorted_by_miss_rate() -> None:
@@ -121,14 +143,14 @@ def test_verdict_points_at_largest_bucket() -> None:
     ]
     summary = summarize([extract(r) for r in rows])
     lines = verdict(summary)
-    assert "买对了商品但没过硬门" in lines[0]
-    assert any("超预算" in line for line in lines)
+    assert "买对了商品和规格，但超预算" in lines[0]
+    assert any("预算" in line for line in lines)
 
 
 def test_report_renders_without_dimensions() -> None:
     summary = summarize([extract(make_row("1", purchased="G", budget_status="fail"))])
     text = format_report("demo", summary)
-    assert "bought_gold_gate_failed" in text
+    assert "bought_gold_over_budget" in text
     assert "失败桶" in text
     assert "判读" in text
 

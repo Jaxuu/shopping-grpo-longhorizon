@@ -50,9 +50,13 @@ OPTION_TOOL = "select_option"
 PAGE_TOOL = "next_page"
 GATE_FAIL = "fail"
 
-# 四个互斥的失败桶，顺序即报告里的顺序（从「最接近成功」到「最远」）。
+# 失败桶，顺序即报告里的顺序（从「最接近成功」到「最远」）。
+# 「买对了商品」这一大类必须拆开：买对 asin 却只拿到 partial，说明**选项选错**
+# （容量/颜色/尺码），和「超预算」是完全不同的处方。
 BUCKETS = (
-    ("bought_gold_gate_failed", "买对了商品但没过硬门（多为超预算）"),
+    ("bought_gold_wrong_variant", "买对了商品，但选项选错（规格不符）"),
+    ("bought_gold_over_budget", "买对了商品和规格，但超预算"),
+    ("bought_gold_other_gate", "买对了商品，卡在别的硬门/无法判定"),
     ("saw_gold_bought_other", "打开过正确商品，却买了别的"),
     ("saw_gold_no_purchase", "打开过正确商品，但没下单"),
     ("never_saw_gold", "从没打开过正确商品"),
@@ -169,30 +173,23 @@ def bucket(record: Mapping[str, Any]) -> str:
     if not gold:
         return "unknown"
     if purchased == gold:
-        return "bought_gold_gate_failed"
+        reward_type = record["reward_type"]
+        if reward_type == "partial_alternative_purchase":
+            return "bought_gold_wrong_variant"
+        if record["budget_status"] == GATE_FAIL:
+            return "bought_gold_over_budget"
+        return "bought_gold_other_gate"
     if gold in opened:
         return "saw_gold_bought_other" if purchased else "saw_gold_no_purchase"
     return "never_saw_gold"
 
 
-def summarize(records: Sequence[Mapping[str, Any]]) -> dict:
-    total = len(records)
-    successes = sum(1 for r in records if r["success"])
-    buckets = Counter(bucket(r) for r in records)
-    failures = [r for r in records if not r["success"]]
-
-    # 失败轨迹的硬门情况：budget / category 各有多少明确 fail。
-    gates = Counter()
-    for record in failures:
-        gates[f"budget:{record['budget_status']}"] += 1
-        gates[f"category:{record['category_status']}"] += 1
-
-    # 维度诊断：只看有打分的失败轨迹，统计「这个维度没拿满分」的比例。
+def _dim_rows(records: Sequence[Mapping[str, Any]]) -> list[dict]:
     dims: dict[str, list[float]] = defaultdict(list)
-    for record in failures:
+    for record in records:
         for name, score in record["dimension_scores"].items():
             dims[name].append(score)
-    dim_rows = [
+    rows = [
         {
             "name": name,
             "n": len(values),
@@ -201,7 +198,37 @@ def summarize(records: Sequence[Mapping[str, Any]]) -> dict:
         }
         for name, values in dims.items()
     ]
-    dim_rows.sort(key=lambda row: (-row["below_full"], row["name"]))
+    rows.sort(key=lambda row: (-row["below_full"], row["name"]))
+    return rows
+
+
+def _opened_hist(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """打开过几个不同商品：0 / 1 / 2 / 3+ 各多少道。"""
+    hist = Counter()
+    for record in records:
+        count = int(record["opened_unique"])
+        hist["0" if count == 0 else "1" if count == 1 else "2" if count == 2 else "3+"] += 1
+    return {key: hist.get(key, 0) for key in ("0", "1", "2", "3+")}
+
+
+def summarize(records: Sequence[Mapping[str, Any]]) -> dict:
+    total = len(records)
+    successes = sum(1 for r in records if r["success"])
+    buckets = Counter(bucket(r) for r in records)
+    failures = [r for r in records if not r["success"]]
+    ok = [r for r in records if r["success"]]
+
+    # 失败轨迹的硬门情况：budget / category 各有多少明确 fail。
+    gates = Counter()
+    for record in failures:
+        gates[f"budget:{record['budget_status']}"] += 1
+        gates[f"category:{record['category_status']}"] += 1
+
+    by_bucket: dict[str, list[dict]] = {}
+    for key, _ in BUCKETS:
+        group = [r for r in failures if bucket(r) == key]
+        if group:
+            by_bucket[key] = _dim_rows(group)
 
     def med(key: str, group: Iterable[Mapping[str, Any]]) -> float:
         values = [float(r[key]) for r in group]
@@ -212,15 +239,17 @@ def summarize(records: Sequence[Mapping[str, Any]]) -> dict:
         "successes": successes,
         "rate": successes / total if total else 0.0,
         "buckets": {name: buckets.get(name, 0) for name, _ in BUCKETS},
-        "unknown_success": buckets.get("success", 0),
         "gates": dict(gates),
-        "dims": dim_rows,
+        "dims": _dim_rows(failures),
+        "dims_by_bucket": by_bucket,
+        "opened_fail": _opened_hist(failures),
+        "opened_ok": _opened_hist(ok),
         "fail_opened_median": med("opened_unique", failures),
         "fail_searches_median": med("searches", failures),
         "fail_pages_median": med("pages", failures),
-        "ok_opened_median": med("opened_unique", [r for r in records if r["success"]]),
-        "ok_searches_median": med("searches", [r for r in records if r["success"]]),
-        "ok_pages_median": med("pages", [r for r in records if r["success"]]),
+        "ok_opened_median": med("opened_unique", ok),
+        "ok_searches_median": med("searches", ok),
+        "ok_pages_median": med("pages", ok),
     }
 
 
@@ -242,13 +271,17 @@ def verdict(summary: Mapping[str, Any]) -> list[str]:
     ]
     lines.append(
         {
-            "bought_gold_gate_failed": "- ⇒ 商品找对了，栽在**硬门**（多半是超预算）。数据该教"
-            "「选完规格后读实际价格再下单」，不是教检索。",
+            "bought_gold_wrong_variant": "- ⇒ 商品找对了，栽在**选项**（容量/颜色/尺码）。"
+            "数据该教「选完规格后逐条核对题面要求」，不是教检索。",
+            "bought_gold_over_budget": "- ⇒ 商品和规格都对，栽在**预算**。数据该教"
+            "「选完规格后读实际价格，超预算就换」。",
+            "bought_gold_other_gate": "- ⇒ 买对了商品，卡在别的硬门或无法判定。先看明细里的 "
+            "`budget` 状态再定。",
             "saw_gold_bought_other": "- ⇒ 找对了也看到了，栽在**取舍**。数据该教「逐条比对候选的约束」"
             "（容量/尺寸/价格），不是教搜更准。",
             "saw_gold_no_purchase": "- ⇒ 看到了却没下单，栽在**决策收尾**。数据该教「确认符合就买」，"
             "不必改检索。",
-            "never_saw_gold": "- ⇒ 根本没看到对的货，栽在**覆盖**。数据该教「换更精确的词 / 往下翻页」。",
+            "never_saw_gold": "- ⇒ 根本没看到对的货，栽在**覆盖**。数据该教「打开更多候选 / 换更精确的词 / 往下翻页」。",
         }[top_name]
     )
     budget_fail = summary["gates"].get(f"budget:{GATE_FAIL}", 0)
@@ -291,7 +324,14 @@ def format_report(name: str, summary: Mapping[str, Any]) -> str:
         f"| 打开过的不同商品数 | {summary['fail_opened_median']:.0f} | {summary['ok_opened_median']:.0f} |",
         f"| 搜索次数 | {summary['fail_searches_median']:.0f} | {summary['ok_searches_median']:.0f} |",
         f"| 翻页次数 | {summary['fail_pages_median']:.0f} | {summary['ok_pages_median']:.0f} |",
+        "",
+        "| 打开过几个不同商品 | 失败 | 成功 |",
+        "|---|---:|---:|",
     ]
+    for key in ("0", "1", "2", "3+"):
+        lines.append(
+            f"| {key} 个 | {summary['opened_fail'].get(key, 0)} | {summary['opened_ok'].get(key, 0)} |"
+        )
     if summary["gates"]:
         lines += ["", "| 硬门状态 | 道数（失败轨迹内） |", "|---|---:|"]
         for key in sorted(summary["gates"]):
@@ -306,6 +346,19 @@ def format_report(name: str, summary: Mapping[str, Any]) -> str:
             lines.append(
                 f"| {row['name']} | {row['n']} | {row['mean']:.2f} | {row['below_full']:.0%} |"
             )
+    for key, label in BUCKETS:
+        rows = summary["dims_by_bucket"].get(key)
+        if not rows:
+            continue
+        lines += [
+            "",
+            f"**{label}（{summary['buckets'].get(key, 0)} 道）的维度失分**",
+            "",
+            "| 维度 | 均值 | 没拿满分的比例 |",
+            "|---|---:|---:|",
+        ]
+        for row in rows:
+            lines.append(f"| {row['name']} | {row['mean']:.2f} | {row['below_full']:.0%} |")
     lines += ["", "**判读**", ""] + verdict(summary)
     return "\n".join(lines)
 
@@ -340,7 +393,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     payload = {}
     for path in args.trajectories:
         records = [extract(row) for row in load_rows(path)]
-        payload[path.name] = (summarize(records), records)
+        # 标签用**父目录名**：所有评测的轨迹都叫 trajectories.jsonl，
+        # 拿文件名当键会让后一个把前一个覆盖掉（2026-10-25 真踩：只打印出一份报告）。
+        label = path.parent.name or path.name
+        if label in payload:
+            label = f"{label}/{path.name}"
+        payload[label] = (summarize(records), records)
 
     if args.json:
         print(json.dumps({k: v[0] for k, v in payload.items()}, ensure_ascii=False, indent=2))
