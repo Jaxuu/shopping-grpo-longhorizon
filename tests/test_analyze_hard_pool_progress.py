@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from scripts.analyze_hard_pool_progress import (
+    analyze_uid_tracking,
     coerce_uid,
     collect_groups,
     detect_uid_kind,
@@ -147,3 +148,44 @@ def test_summarize_val_keeps_only_val_prefixed_metrics() -> None:
         "val-core/shopsimulator/reward/mean@1",
         "val-aux/num_turns",
     }
+
+
+def test_analyze_uid_tracking_counts_learned_tasks() -> None:
+    """早期做不到、后期做到了 = learned；一直做不到 = still_fail。"""
+    per_step = {
+        # early_cut = 3, late_cut = 6（steps_done = 9）
+        1: [make_group("a", False), make_group("b", False)],
+        2: [make_group("a", False)],
+        8: [make_group("a", True), make_group("b", False)],
+        9: [make_group("c", True)],  # 只在后期出现 ⇒ 不可比较
+    }
+    stats = analyze_uid_tracking(per_step, 9)
+    assert stats["uniq_uids"] == 3
+    assert stats["comparable"] == 2
+    assert stats["learned"] == 1
+    assert stats["still_fail"] == 1
+    assert stats["learned_rate"] == 0.5
+    assert stats["usable"] is True
+
+
+def test_analyze_uid_tracking_rejects_unstable_uids() -> None:
+    """uid 每步重新生成（随机 UUID）时不能用于跨步追踪。"""
+    per_step = {step: [make_group(f"uuid-{step}", False)] for step in range(1, 10)}
+    stats = analyze_uid_tracking(per_step, 9)
+    assert stats["uniq_uids"] == 9
+    assert stats["repeat_rate"] == 0.0
+    assert stats["comparable"] == 0
+    assert stats["usable"] is False
+
+
+def test_analyze_uid_tracking_marks_hard_proxy() -> None:
+    """早期出现 ≥2 次且全失败 = 更像难题的代理集合。"""
+    per_step = {
+        1: [make_group("hard", False)],
+        2: [make_group("hard", False)],
+        3: [make_group("once", False)],  # 只出现 1 次，不进 hard_proxy
+        8: [make_group("hard", True), make_group("once", False)],
+    }
+    stats = analyze_uid_tracking(per_step, 9)
+    assert stats["hard_proxy"] == 1
+    assert stats["hard_proxy_learned"] == 1

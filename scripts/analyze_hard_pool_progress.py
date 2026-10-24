@@ -199,6 +199,78 @@ def collect_groups(records: list[dict]) -> dict[int, list[dict]]:
     return per_step
 
 
+def analyze_uid_tracking(per_step: dict[int, list[dict]], steps_done: int) -> dict:
+    """不依赖 task_id 的替代口径：追踪每个 uid 自己「早期会不会、后期会不会」。
+
+    实跑发现 uid 是随机 UUID（`b8c3a366-…`），与题目身份无关，按 task_id 拆难题这条路走不通。
+    但**只要同一道题跨步拿到同一个 uid**，就能回答「原本做不到的题，现在做到了没有」——
+    这比「难题 vs 简单题」更宽，但方向完全一致，且不需要任何题目映射。
+
+    分三档（只统计**早期和后期都出现过**的 uid）：
+      - 早期一次没买到、后期买到了 ⇒ **学会了**（这是唯一算数的证据）
+      - 早期没买到、后期还是没买到 ⇒ 还是不会
+      - 早期就买到过 ⇒ 本来就会
+    """
+    history: dict[str, list[dict]] = defaultdict(list)
+    for step in sorted(per_step):
+        for group in per_step[step]:
+            uid = group.get("uid")
+            key = uid if isinstance(uid, str) else json.dumps(uid, sort_keys=True)
+            history[key].append(
+                {
+                    "step": step,
+                    "ok": bool(any(group.get("purchase_success") or ())),
+                    "kept": bool(group.get("kept")),
+                }
+            )
+
+    total = sum(len(events) for events in history.values())
+    uniq = len(history)
+    repeat_rate = 1.0 - uniq / total if total else 0.0
+    early_cut = steps_done / 3.0
+    late_cut = steps_done * 2.0 / 3.0
+
+    learned = still_fail = already = 0
+    comparable = 0
+    hard_proxy = 0  # 早期出现 ≥2 次且全失败 —— 更像难题
+    hard_proxy_learned = 0
+    for events in history.values():
+        early = [event for event in events if event["step"] <= early_cut]
+        late = [event for event in events if event["step"] > late_cut]
+        if not early or not late:
+            continue
+        comparable += 1
+        early_ok = sum(event["ok"] for event in early)
+        late_ok = sum(event["ok"] for event in late)
+        if early_ok:
+            already += 1
+            continue
+        if late_ok:
+            learned += 1
+            if len(early) >= 2:
+                hard_proxy_learned += 1
+        else:
+            still_fail += 1
+        if len(early) >= 2:
+            hard_proxy += 1
+
+    return {
+        "uniq_uids": uniq,
+        "group_records": total,
+        "repeat_rate": repeat_rate,
+        "comparable": comparable,
+        "learned": learned,
+        "still_fail": still_fail,
+        "already": already,
+        "learned_rate": learned / (learned + still_fail) if (learned + still_fail) else 0.0,
+        "hard_proxy": hard_proxy,
+        "hard_proxy_learned": hard_proxy_learned,
+        "early_cut": early_cut,
+        "late_cut": late_cut,
+        "usable": repeat_rate >= 0.30 and comparable > 0,
+    }
+
+
 def group_stats(groups: list[dict]) -> dict:
     if not groups:
         # 空组也要返回完整键：window_rows 会无条件取 kept / any_success / rollouts
@@ -287,6 +359,7 @@ def window_rows(stats: dict[int, dict], window: int) -> list[dict]:
 
 
 def render(summary: dict, args: argparse.Namespace) -> str:
+    tracking = summary.get("tracking") or {}
     lines = ["# M10-H 训练中途诊断：难题有没有开始被解决", ""]
     lines += [
         f"- 诊断文件：`{args.diagnostics}`",
@@ -296,7 +369,7 @@ def render(summary: dict, args: argparse.Namespace) -> str:
         f"- uid 口径判定：**{summary['uid_kind']}**",
         "",
     ]
-    if summary["uid_kind"] == "unknown":
+    if summary["uid_kind"] == "unknown" and not tracking.get("usable"):
         diag = summary.get("uid_diag") or {}
         lines += [
             "> ⚠️ 认不出 uid 是 task_id 还是 index，下面的难题/简单题拆分**不可信**。",
@@ -312,6 +385,7 @@ def render(summary: dict, args: argparse.Namespace) -> str:
             f"| 命中难题 task_id 的次数 | {diag.get('match_task_id')} |",
             f"| 命中难题 index 的次数 | {diag.get('match_index')} |",
             f"| 池子行数 | {summary['pool_rows']} |",
+            f"| uid 重复率（<30% 说明每步重新生成） | {tracking.get('repeat_rate', 0.0):.1%} |",
             "",
             "> 把这整段发给我，我按真实口径改判据。若「收集到的组总数」是 0，"
             "说明补丁没往诊断文件写 `groups`，那是另一回事。",
@@ -324,7 +398,12 @@ def render(summary: dict, args: argparse.Namespace) -> str:
         primary = VAL_PRIMARY if VAL_PRIMARY in keys else (keys[0] if keys else None)
         lines += ["## 1. 验证集分数（49 题，**全是简单题**）", ""]
         lines += [f"| step | `{primary}` |", "|---:|---:|"]
-        for row in val_rows:
+        shown = val_rows
+        if len(val_rows) > 12:
+            shown = val_rows[:6] + val_rows[-6:]
+        for idx, row in enumerate(shown):
+            if len(shown) < len(val_rows) and idx == 6:
+                lines.append(f"| … | 省略 {len(val_rows) - 12} 个点 |")
             value = row["metrics"].get(primary)
             lines.append(f"| {row['step']} | {value:.4f} |" if value is not None else f"| {row['step']} | — |")
         lines += [
@@ -335,43 +414,106 @@ def render(summary: dict, args: argparse.Namespace) -> str:
             "",
         ]
 
-    lines += [
-        f"## 2. 难题 vs 简单题（每 {args.window} 步汇总）",
-        "",
-        "> 「买到匹配」= 该组 4 条 rollout 里至少一条 `purchase_success=True`"
-        "（`gold_purchase` 或 `valid_alternative_purchase`）。",
-        "> 难题的 gold 在 BM25 前 20 名之外 ⇒ **不翻页或换出更精确的词就买不到**，"
-        "所以这一列从 0 抬起来 = 难题开始被解决。",
-        "",
-        "| 步 | 难题组数 | 难题 kept | 难题买到匹配 | 难题 utility | 简单组数 | 简单 kept | 简单买到匹配 | 简单 utility |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for row in summary["windows"]:
-        hard, easy = row["hard"], row["easy"]
-        lines.append(
-            f"| {row['steps'][0]}–{row['steps'][1]} | {hard['groups']} | "
-            f"{hard['kept_rate']:.1%} | **{hard['any_success_rate']:.1%}** | "
-            f"{hard['utility_mean']:+.3f} | {easy['groups']} | {easy['kept_rate']:.1%} | "
-            f"{easy['any_success_rate']:.1%} | {easy['utility_mean']:+.3f} |"
-        )
-
+    tracking = summary.get("tracking") or {}
+    use_track = summary["uid_kind"] == "unknown" and tracking.get("usable")
     hard_all = summary["overall"]["hard"]
     easy_all = summary["overall"]["easy"]
-    lines += [
-        "",
-        "| 全程 | 组数 | kept | 买到匹配 | utility |",
-        "|---|---:|---:|---:|---:|",
-        f"| 难题 | {hard_all['groups']} | {hard_all['kept_rate']:.1%} | "
-        f"**{hard_all['any_success_rate']:.1%}** | {hard_all['utility_mean']:+.3f} |",
-        f"| 简单题 | {easy_all['groups']} | {easy_all['kept_rate']:.1%} | "
-        f"{easy_all['any_success_rate']:.1%} | {easy_all['utility_mean']:+.3f} |",
-        "",
-        "## 3. 判读",
-        "",
-    ]
 
-    if summary["uid_kind"] == "unknown":
-        lines.append("- 口径未定，先解决上面的 uid 问题。")
+    if use_track:
+        lines += [
+            "## 2. 按题追踪（uid 稳定，不依赖 task_id）",
+            "",
+            f"> 实跑发现 uid 是随机 UUID，跟题目身份无关，所以按 task_id 拆难题这条路不通。",
+            f"> 但同一道题跨步拿到的是同一个 uid，于是改问一个更直接的问题："
+            f"**前 1/3 步（≤{tracking['early_cut']:.0f} 步）做不到的题，"
+            f"后 1/3 步（>{tracking['late_cut']:.0f} 步）做到了没有**。",
+            "",
+            "| 项 | 值 |",
+            "|---|---:|",
+            f"| uid 唯一数 / 组记录数 | {tracking['uniq_uids']} / {tracking['group_records']} |",
+            f"| 重复率（同一题被反复抽到） | {tracking['repeat_rate']:.1%} |",
+            f"| 可比较的题（早期、后期都出现过） | {tracking['comparable']} |",
+            f"| 早期就买到过（本来就会） | {tracking['already']} |",
+            f"| **早期没买到 → 后期买到了（学会了）** | **{tracking['learned']}**"
+            f"（{tracking['learned_rate']:.1%}） |",
+            f"| 早期没买到 → 后期还是没买到 | {tracking['still_fail']} |",
+            f"| 其中「早期出现≥2 次且全失败」的更像难题 | {tracking['hard_proxy']}，"
+            f"学会 {tracking['hard_proxy_learned']} |",
+            "",
+        ]
+    else:
+        lines += [
+            f"## 2. 难题 vs 简单题（每 {args.window} 步汇总）",
+            "",
+            "> 「买到匹配」= 该组 4 条 rollout 里至少一条 `purchase_success=True`"
+            "（`gold_purchase` 或 `valid_alternative_purchase`）。",
+            "> 难题的 gold 在 BM25 前 20 名之外 ⇒ **不翻页或换出更精确的词就买不到**，"
+            "所以这一列从 0 抬起来 = 难题开始被解决。",
+            "",
+            "| 步 | 难题组数 | 难题 kept | 难题买到匹配 | 难题 utility | 简单组数 | 简单 kept | 简单买到匹配 | 简单 utility |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for row in summary["windows"]:
+            hard, easy = row["hard"], row["easy"]
+            lines.append(
+                f"| {row['steps'][0]}–{row['steps'][1]} | {hard['groups']} | "
+                f"{hard['kept_rate']:.1%} | **{hard['any_success_rate']:.1%}** | "
+                f"{hard['utility_mean']:+.3f} | {easy['groups']} | {easy['kept_rate']:.1%} | "
+                f"{easy['any_success_rate']:.1%} | {easy['utility_mean']:+.3f} |"
+            )
+
+        lines += [
+            "",
+            "| 全程 | 组数 | kept | 买到匹配 | utility |",
+            "|---|---:|---:|---:|---:|",
+            f"| 难题 | {hard_all['groups']} | {hard_all['kept_rate']:.1%} | "
+            f"**{hard_all['any_success_rate']:.1%}** | {hard_all['utility_mean']:+.3f} |",
+            f"| 简单题 | {easy_all['groups']} | {easy_all['kept_rate']:.1%} | "
+            f"{easy_all['any_success_rate']:.1%} | {easy_all['utility_mean']:+.3f} |",
+            "",
+        ]
+
+    lines += ["## 3. 判读", ""]
+
+    if use_track:
+        rate = tracking["learned_rate"]
+        if rate == 0.0:
+            lines += [
+                f"- 🔴 **{tracking['still_fail']} 道「早期做不到」的题，"
+                f"后 1/3 步里一道都没做到** ⇒ 模型没有学会任何新行为。",
+                "- 这就是负结果。**现在可以停**，剩下的步数不会改变结论。",
+            ]
+        elif rate < 0.10:
+            lines += [
+                f"- 🟡 早期做不到的题里，只有 **{tracking['learned']} 道（{rate:.1%}）**"
+                "后来做到了 —— 零星有信号，但很弱。",
+                "- 跑完 100 步再看 Final-200；若终局仍 <63%，该动的是「每题采样条数 n」"
+                "或「奖励的稀疏程度」，不是继续加步数。",
+            ]
+        else:
+            lines += [
+                f"- 🟢 早期做不到的题里，有 **{tracking['learned']} 道（{rate:.1%}）**"
+                "后来做到了 —— 这是行为改变的直接证据。",
+                "- **注意**：换出更精确的查询词也能达成，不等于翻页。"
+                "翻页率仍以 Final-200 的 `analyze_paging_necessity.py` 为准。",
+            ]
+        if tracking["repeat_rate"] < 0.30:
+            lines += [
+                f"- ⚠️ 重复率只有 {tracking['repeat_rate']:.1%}：uid 可能每次 rollout 都重新生成，"
+                "「同一题跨步追踪」不成立，上面的数**不可信**。",
+            ]
+    elif summary["uid_kind"] == "unknown":
+        repeat = tracking.get("repeat_rate", 0.0)
+        if repeat < 0.30:
+            lines += [
+                f"- 🔴 **uid 是随机 UUID，且重复率只有 {repeat:.1%}** ⇒ "
+                "同一道题每次 rollout 拿到的 uid 都不同，「跨步追踪同一题」不成立。",
+                "- 这份诊断文件**无法判断难题进展**，不是跑得不好，是数据里没带题目身份。",
+                "- 出路只有一条：让补丁把 `extra_info.task_id` 写进 uid（或另加一个 `task_id` 字段），"
+                "下一轮生效。本轮剩余步数照常跑完，用 Final-200 判据。",
+            ]
+        else:
+            lines.append("- 口径未定，先解决上面的 uid 问题。")
     elif hard_all["groups"] == 0:
         lines.append("- ⚠️ 一个难题组都没抽到 —— 训练池里难题没生效，检查 `--train-data`。")
     elif hard_all["any_success_rate"] == 0.0:
@@ -452,6 +594,7 @@ def main() -> int:
         for record in records
         if record.get("event") == "optimizer_step" and record.get("global_step") is not None
     }
+    tracking = analyze_uid_tracking(per_step, len(updated))
     summary = {
         "steps_done": len(updated),
         "skipped_rounds": sum(1 for r in records if r.get("event") == "skipped_update"),
@@ -459,6 +602,7 @@ def main() -> int:
         "hard_count": len(hard_sets.get("task_id") or hard_sets.get("index") or ()),
         "uid_kind": uid_kind,
         "uid_diag": uid_diag,
+        "tracking": tracking,
         "group_records": sum(len(groups) for groups in per_step.values()),
         "steps_with_groups": len(per_step),
         "val": summarize_val(records),
