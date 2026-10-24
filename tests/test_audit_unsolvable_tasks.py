@@ -9,6 +9,7 @@ from scripts.audit_unsolvable_tasks import (
     classify,
     collect,
     extract,
+    format_ids,
     format_report,
     format_rescore,
     rescore,
@@ -205,6 +206,39 @@ def test_rescore_excludes_unsolvable_from_denominator(tmp: pathlib.Path) -> None
     assert row["raw"] == 1 and row["tasks"] == 3
     assert row["winnable"] == 2 and row["adj"] == 1
     assert abs(row["adj_rate"] - 0.5) < 1e-9
-    text = format_rescore(out, {"2"})
+    # 3 题属于冒烟规模，不进排名表；用一条 200 题的行验证渲染。
+    text = format_rescore(
+        [{**row, "model": "full", "tasks": 200, "winnable": 180, "adj": 127,
+          "raw": 127, "raw_rate": 0.635, "adj_rate": 127 / 180}],
+        {"2"},
+    )
     assert "调整后" in text
-    assert "50.0%" in text
+    assert "70.6%" in text
+
+
+def test_format_ids_lists_every_group() -> None:
+    rows = [
+        make_row("1", reward_type="gold_purchase", purchased="G"),
+        make_row("2", reward_type="partial_alternative_purchase", purchased="G",
+                 dims={"brand": 0.0}),
+        make_row("3", purchased="X"),
+    ]
+    summary = summarize([classify([extract(r)]) for r in rows], 1)
+    text = format_ids(summary)
+    assert "## solved（1 道）" in text
+    assert "## product_mismatch（1 道）" in text
+    assert "## never_solved（1 道）" in text
+    assert "2" in text and "3" in text
+
+
+def test_format_rescore_keeps_tiny_dirs_out_of_ranking(tmp: pathlib.Path) -> None:
+    rows = [{"model": "big", "tasks": 200, "raw": 127, "raw_rate": 0.635,
+             "winnable": 180, "adj": 127, "adj_rate": 127 / 180},
+            {"model": "smoke", "tasks": 3, "raw": 2, "raw_rate": 2 / 3,
+             "winnable": 3, "adj": 2, "adj_rate": 2 / 3}]
+    text = format_rescore(rows, {"x"})
+    assert "未计入排名" in text
+    assert "smoke（2/3）" in text
+    # 排名里只有 big
+    assert "| big |" in text
+    assert "| smoke |" not in text

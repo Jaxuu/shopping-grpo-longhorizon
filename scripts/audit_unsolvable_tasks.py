@@ -334,6 +334,8 @@ def rescore(paths: Sequence[Path], unsolvable: set[str]) -> list[dict]:
 
 
 def format_rescore(rows: Sequence[Mapping[str, Any]], unsolvable: set[str]) -> str:
+    full = [row for row in rows if row["tasks"] >= 100]
+    partial = [row for row in rows if row["tasks"] < 100]
     lines = [
         "# 按可解题重算历史成绩",
         "",
@@ -343,20 +345,43 @@ def format_rescore(rows: Sequence[Mapping[str, Any]], unsolvable: set[str]) -> s
         "| 评测 | 原分数 | 可解题数 | 调整后 | 变化 |",
         "|---|---:|---:|---:|---:|",
     ]
-    for row in rows:
+    for row in full:
         delta = (row["adj_rate"] - row["raw_rate"]) * 100
         lines.append(
             f"| {row['model']} | {row['raw']}/{row['tasks']} = {row['raw_rate']:.1%} | "
             f"{row['winnable']} | {row['adj']}/{row['winnable']} = {row['adj_rate']:.1%} | "
             f"{delta:+.1f}pp |"
         )
-    if rows:
-        best = rows[0]
+    if full:
+        best = max(row["adj_rate"] for row in full)
+        tied = [row["model"] for row in full if abs(row["adj_rate"] - best) < 1e-12]
         lines += [
             "",
-            f"**最高**：{best['model']} —— 调整后 {best['adj_rate']:.1%}"
-            f"（原始 {best['raw_rate']:.1%}）。",
+            f"**最高**：{' / '.join(tied)} —— 调整后 {best:.1%}。"
+            + ("（并列，说明这些 checkpoint 在可解题上等价）" if len(tied) > 1 else ""),
         ]
+    if partial:
+        # 冒烟 / 探针目录只有 3–12 题，混进排名会误导，单列。
+        lines += [
+            "",
+            "> 未计入排名（题数 < 100，是冒烟或探针目录）："
+            + "、".join(f"{row['model']}（{row['raw']}/{row['tasks']}）" for row in partial),
+        ]
+    return "\n".join(lines)
+
+
+def format_ids(summary: Mapping[str, Any]) -> str:
+    """把每类的完整 task_id 打出来，方便和翻页分析逐题对照。"""
+    lines = []
+    for key in STATUS_ORDER:
+        items = summary["groups"][key]
+        if not items:
+            continue
+        ids = [item["task_id"] for item in items]
+        lines.append(f"## {key}（{len(ids)} 道）")
+        lines.append("")
+        lines.append(", ".join(ids))
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -369,11 +394,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="额外按「剔除无解题」的口径重算所有评测目录的分数",
     )
+    parser.add_argument(
+        "--ids",
+        action="store_true",
+        help="只打印每类的完整 task_id 列表（便于和翻页分析逐题对照）",
+    )
     args = parser.parse_args(argv)
 
     per_task, dirs = collect(args.trajectories)
     items = [classify(records) for records in per_task.values()]
     summary = summarize(items, dirs)
+    if args.ids:
+        print(format_ids(summary))
+        return 0
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
