@@ -150,6 +150,33 @@ for cache in "${HOME}/.cache/huggingface" "/root/rivermind-data/hf"; do
   [[ -d "${cache}" ]] && printf '%7s MB  %s\n' "$(size_mb "${cache}")" "${cache}"
 done
 
+# 仓库以外的占用：盘满的时候，往往是这些东西而不是 outputs 在吃空间。
+# 只读、不参与删除；列出来是为了不把「删了仓库里的东西还是不够」这种情况留到最后才发现。
+echo
+echo "== 仓库以外（只读，不参与清理）"
+for extra in \
+  "${ROOT}/.venv" \
+  "${ROOT}/.tmp-pytest" \
+  "${HOME}/.cache/uv" \
+  "${HOME}/.cache/pip" \
+  "${HOME}/.cache/vllm" \
+  "${HOME}/.triton" \
+  "${HOME}/.nv" \
+  "${HOME}/.ollama" \
+  "/var/lib/docker"; do
+  [[ -e "${extra}" ]] || continue
+  printf '%7s MB  %s\n' "$(size_mb "${extra}")" "${extra}"
+done
+
+MOUNT="$(df -P "${ROOT}" 2>/dev/null | tail -1 | awk '{print $6}')"
+if [[ -n "${MOUNT}" && -d "${MOUNT}" && "${MOUNT}" != "/" ]]; then
+  echo
+  echo "== ${MOUNT} 顶层占用（前 12，只读）"
+  du -sm "${MOUNT}"/* 2>/dev/null | sort -rn | head -12 | while read -r mb path; do
+    printf '%7s MB  %s\n' "${mb}" "${path}"
+  done
+fi
+
 if (( ${#CANDIDATES[@]} == 0 )); then
   echo
   echo "没有可删的候选目录。"
