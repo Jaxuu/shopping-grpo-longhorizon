@@ -114,11 +114,15 @@ def diagnose(
     in_top2 = 0
     in_top3 = 0
     wrong_tasks: list[dict] = []
+    right_tasks: list[dict] = []
     for task_id, votes in votes_by_task.items():
         keys = good.get(task_id) or set()
         winner, tied = ens.plurality(votes)
         ok = (not tied) and winner is not None and winner in keys
         if ok:
+            right_tasks.append(
+                {"task_id": task_id, "votes": dict(ranked(votes)), "good_keys": sorted(keys)}
+            )
             continue
         if tied:
             # 平票没有「赢家票数」可比，单独计一行，不混进差票直方图。
@@ -149,7 +153,10 @@ def diagnose(
                 "task_id": task_id,
                 "margin": margin,
                 "tied": tied,
+                "winner": winner,
                 "winner_votes": winner_votes,
+                "votes": dict(ranked(votes)),
+                "good_keys": sorted(keys),
                 "correct_in_top2": bool(top2 & keys),
                 "correct_in_top3": bool(top3 & keys),
                 "champion_correct": bool(pick is not None and pick in keys),
@@ -166,6 +173,7 @@ def diagnose(
         "wrong_tasks": sorted(
             wrong_tasks, key=lambda item: (item["margin"] is None, item["margin"] or 0)
         ),
+        "right_tasks": right_tasks,
     }
 
 
@@ -176,8 +184,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--champion", default=DEFAULT_CHAMPION, help="用来加权/兜底的目录名")
     parser.add_argument("--min-tasks", type=int, default=100)
     parser.add_argument("--min-overlap", type=float, default=0.8)
+    parser.add_argument(
+        "--loose",
+        action="store_true",
+        help="把 purchase_success 也算做对（valid_alternative 会被算成 gold，仅作对照）",
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
+    strict = not args.loose
 
     reference_ids = ens.probe.task_ids_of(args.reference)
     reference_set = set(reference_ids)
@@ -210,7 +224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key is None:
                 continue
             votes[key] += 1
-            if ens.is_success(record):
+            if ens.is_success(record, strict=strict):
                 keys.add(key)
         votes_by_task[task_id] = votes
         good[task_id] = keys
@@ -278,6 +292,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print()
 
+    # 「每题有几个不同的正确身份」：>1 说明这题有多个可接受答案，那么
+    # 「票数前 2 名里有一个正确」更容易达成，oracle@top-2 也就更乐观。
+    multi = Counter(len(keys) for keys in good.values() if keys)
+    print("## 有几种「正确答案」（只统计至少被买对一次的题）")
+    print()
+    print("| 不同的正确身份数 | 题数 |")
+    print("|---|---:|")
+    for count in sorted(multi):
+        print(f"| {count} | {multi[count]} |")
+    print()
+    print(f"（并集 {sum(multi.values())} 题；只有唯一正确答案的 {multi.get(1, 0)} 题）")
+    print()
+
     best_rule = max(
         plain,
         tie_broken,
@@ -308,8 +335,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "n": n,
             "target": target,
             "champion": args.champion,
+            "strict": strict,
             "rules": {name: ok for name, ok, _ in rows},
             "diagnosis": diag,
+            "good_key_counts": {str(k): v for k, v in sorted(multi.items())},
         }
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(

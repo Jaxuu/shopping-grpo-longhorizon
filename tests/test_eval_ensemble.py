@@ -14,12 +14,21 @@ ens = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ens)
 
 
-def _record(task_id: int, asin: str | None, *, success: bool = False) -> dict:
+def _record(
+    task_id: int,
+    asin: str | None,
+    *,
+    reward_type: str | None = None,
+    purchase_success: bool = False,
+) -> dict:
     return {
         "task_id": task_id,
         "terminal_result": {
             "purchase": {"asin": asin} if asin else {},
-            "reward_detail": {"purchase_success": success},
+            "reward_detail": {
+                "reward_type": reward_type,
+                "purchase_success": purchase_success,
+            },
         },
     }
 
@@ -93,11 +102,21 @@ def test_vote_summary_never_exceeds_union() -> None:
 
 
 def test_purchased_and_success_read_terminal_result() -> None:
-    record = _record(1, "ABC", success=True)
+    record = _record(1, "ABC", reward_type="gold_purchase", purchase_success=True)
     assert ens.purchased(record) == "ABC"
     assert ens.is_success(record) is True
     assert ens.purchased({"terminal_result": {"purchase": {}}}) is None
     assert ens.is_success({}) is False
+
+
+def test_is_success_strict_rejects_valid_alternative() -> None:
+    """`valid_alternative_purchase` 的 purchase_success 也是 True，但 strict 口径不认它。
+
+    历史上 compare_selftest 报 179、strict 报 178，差的就是这一条。
+    """
+    record = _record(1, "ABC", reward_type="valid_alternative_purchase", purchase_success=True)
+    assert ens.is_success(record) is False
+    assert ens.is_success(record, strict=False) is True
 
 
 def test_purchased_distinguishes_options() -> None:
