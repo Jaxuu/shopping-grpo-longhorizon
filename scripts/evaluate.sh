@@ -13,6 +13,10 @@ LLM_API_KEY="${LLM_API_KEY:-EMPTY}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
 # 诊断开关：买之前必须打开过多少个不同候选。默认 0=关闭，行为与历史评测完全一致。
 MIN_OPENED_BEFORE_BUY="${MIN_OPENED_BEFORE_BUY:-0}"
+# 采样温度。默认 0.0 = 贪心解码，与全部历史评测口径一致（分数可比）。
+# 只有做「同一模型多次采样再投票」时才需要调高；调高后单次分数会掉，别拿它比历史。
+TEMPERATURE="${TEMPERATURE:-0.0}"
+TOP_P="${TOP_P:-1.0}"
 # 每题步数上限固定 35，不给环境变量：环境侧 configs/environment.json 的
 # termination.max_steps=35 是冻结契约，SHOP_MAX_STEPS 设成别的值会直接抛 ValueError。
 # 调大这里的值没有意义（环境已经在 35 步终止），调小会让客户端先停而环境不终止，
@@ -28,6 +32,8 @@ cd "$ROOT"
   --model "$SERVED_MODEL_NAME" \
   --llm-base-url "$LLM_BASE_URL" \
   --api-key "$LLM_API_KEY" \
+  --temperature "$TEMPERATURE" \
+  --top-p "$TOP_P" \
   --min-opened-before-buy "$MIN_OPENED_BEFORE_BUY"
 
 "$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"
