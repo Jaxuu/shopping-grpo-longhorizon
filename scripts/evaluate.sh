@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${1:-model}"
 OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$ROOT/outputs/evaluation/$LABEL}"
+# 评测集默认是冻结的 Final-200。要跑 dev 集或训练集自测卷时显式传 BENCHMARK=，
+# 产物目录也请另起名字（Final-200 的分数只能和 Final-200 比）。
+BENCHMARK="${BENCHMARK:-$ROOT/data/evaluation/tasks.jsonl}"
 SHOPSIM_BASE_URL="${SHOPSIM_BASE_URL:-http://127.0.0.1:5700}"
 LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 LLM_API_KEY="${LLM_API_KEY:-EMPTY}"
@@ -18,7 +21,7 @@ MIN_OPENED_BEFORE_BUY="${MIN_OPENED_BEFORE_BUY:-0}"
 mkdir -p "$OUTPUT_DIR"
 cd "$ROOT"
 "$ROOT/.venv/bin/python" scripts/evaluate_shop_benchmark.py \
-  --benchmark data/evaluation/tasks.jsonl \
+  --benchmark "$BENCHMARK" \
   --output "$OUTPUT_DIR/trajectories.jsonl" \
   --summary "$OUTPUT_DIR/summary.json" \
   --base-url "$SHOPSIM_BASE_URL" \
