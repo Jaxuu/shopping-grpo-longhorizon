@@ -34,6 +34,7 @@ dev 集是**内部尺子**：调参、选题、选检查点只看它；Final-200
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -245,15 +246,20 @@ def admit_all(
 
 
 def load_searcher(index_path: Path):
-    """冻结的 BM25 检索器（懒导入：只在真正要算可达性时才付这个代价）。"""
-    from web_agent_site.engine.search import MultiFieldBM25Searcher
+    """冻结的 BM25 检索器（懒导入：只在真正要算可达性时才付这个代价）。
 
-    if not Path(index_path).is_file():
-        raise SystemExit(
-            f"检索索引不存在：{index_path}\n"
-            "先跑一次 scripts/audit_solvability.py 让它建索引，或加 --no-reachability 跳过可达性过滤。"
-        )
-    return MultiFieldBM25Searcher(Path(index_path))
+    索引不存在时**就地建一次**（约 1 分钟），与 `audit_retrieval_reachability.py`
+    的做法一致——服务器上索引是 gitignored 的，报错退出会让这条命令没法一键跑。
+    """
+    from web_agent_site.engine.search import MultiFieldBM25Searcher, build_index
+
+    index_path = Path(index_path)
+    if not index_path.is_file():
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(audit.DEFAULT_PRODUCTS, "rt", encoding="utf-8") as handle:
+            products = json.load(handle)
+        build_index(iter(products), index_path, product_data_sha256="local-audit")
+    return MultiFieldBM25Searcher(index_path)
 
 
 def gold_rank(
@@ -454,7 +460,7 @@ def build_selftest(args: argparse.Namespace) -> int:
 
     print(f"训练池 {pool_path}：{len(pool_ids)} 道 → 抽 {len(chosen)} 道")
     print(f"写入 {tasks_path}（sha256 {metadata['sha256'][:16]}…）")
-    print("评测：BENCHMARK=%s bash scripts/evaluate.sh %s" % (tasks_path, out_dir.name))
+    print(f"评测：BENCHMARK={tasks_path} bash scripts/evaluate.sh {out_dir.name}")
     return 0
 
 
