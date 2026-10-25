@@ -88,9 +88,18 @@ def purchased(record: Mapping) -> str | None:
     return f"{asin}|{suffix}" if suffix else str(asin)
 
 
-def is_success(record: Mapping) -> bool:
+def is_success(record: Mapping, *, strict: bool = True) -> bool:
+    """是否算做对。
+
+    默认 **strict**：只认 `reward_type == "gold_purchase"`，与项目约定「以后统一用
+    strict/gold 口径」一致。`purchase_success` 在 `valid_alternative_purchase` 上
+    也是 True（历史上有过 179 vs 178 的差，见 2026-10-26 记录），用它会把「买到了
+    另一个也算对的东西」算成 gold，口径就飘了。`strict=False` 时才退回旧行为。
+    """
     detail = ((record.get("terminal_result") or {}).get("reward_detail")) or {}
-    return detail.get("purchase_success") is True or detail.get("reward_type") == "gold_purchase"
+    if detail.get("reward_type") == "gold_purchase":
+        return True
+    return (not strict) and detail.get("purchase_success") is True
 
 
 def plurality(votes: Mapping[str, int]) -> tuple[str | None, bool]:
@@ -144,7 +153,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="与参照集 task_id 的重合率低于此值的目录直接剔除（防止把 dev-300 的分数混进 Final-200）",
     )
     parser.add_argument("--out", type=Path, default=None, help="把结果写成 json")
+    parser.add_argument(
+        "--loose",
+        action="store_true",
+        help="把 purchase_success 也算做对（valid_alternative 会被算成 gold，仅作对照）",
+    )
     args = parser.parse_args(argv)
+    strict = not args.loose
 
     reference_ids = probe.task_ids_of(args.reference)
     reference_set = set(reference_ids)
@@ -170,19 +185,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"- `{label}`：重合 {overlap:.0%}")
         print()
 
-    print(f"# 投票集成：{len(runs)} 个评测目录，参照集 {len(reference_ids)} 题")
+    print(
+        f"# 投票集成：{len(runs)} 个评测目录，参照集 {len(reference_ids)} 题"
+        f"（口径 {'strict/gold' if strict else 'loose/purchase_success'}）"
+    )
     print()
 
     per_model: dict[str, dict[int, bool]] = {}
-    print("| 模型 | 题数 | 做对 | 准确率 |")
-    print("|---|---:|---:|---:|")
+    loose_only: dict[str, int] = {}
+    print("| 模型 | 题数 | 做对 | 准确率 | 宽松口径多算 |")
+    print("|---|---:|---:|---:|---:|")
     for label, rows in sorted(runs.items()):
         table = {
-            int(row["task_id"]): is_success(row) for row in rows if row.get("task_id") is not None
+            int(row["task_id"]): is_success(row, strict=strict)
+            for row in rows
+            if row.get("task_id") is not None
         }
         per_model[label] = table
+        loose_only[label] = sum(
+            1
+            for row in rows
+            if row.get("task_id") is not None
+            and not is_success(row, strict=strict)
+            and is_success(row, strict=False)
+        )
         ok = sum(1 for value in table.values() if value)
-        print(f"| `{label}` | {len(table)} | {ok} | {ok / len(table):.1%} |")
+        print(f"| `{label}` | {len(table)} | {ok} | {ok / len(table):.1%} | {loose_only[label]} |")
     print()
 
     tasks = [task_id for task_id in reference_ids]
@@ -205,7 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key is None:
                 continue
             votes[key] += 1
-            if is_success(record):
+            if is_success(record, strict=strict):
                 good_keys.add(key)
         votes_by_task[task_id] = votes
         good_keys_by_task[task_id] = good_keys
@@ -283,6 +311,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.out:
         payload = {
+            "strict": strict,
+            "loose_only": loose_only,
             "dropped": {label: round(overlap, 4) for label, overlap in dropped},
             "models": {
                 label: {"n": len(table), "ok": sum(1 for v in table.values() if v)}
