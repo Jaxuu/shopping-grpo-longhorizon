@@ -38,6 +38,9 @@ PROTECT=(
   "outputs/models/sft-b-curriculum/stage-c/merged"
   # GRPO champion：grpo-m6/global_step_50
   "outputs/models/grpo-m6/global_step_50"
+  # 注意：m10h 的三份 GRPO 产物（grpo-m10h / -merged / -s50-merged，约 30 GB）**不保护**。
+  # 那次实验是 62%→62% 的空转，结论已入 docs/project-history.md，逐题证据留在
+  # outputs/evaluation/grpo-m10h*（几十 MB）。删掉只失去「再起一次那个模型」的能力。
   # 本轮实验产物（stage-a 还要单独评测）；连 adapter 一起留，否则没法续跑。
   # stage-full 是单阶段方案（M10-R v2）的产物目录，命名规则与 a/b 一致。
   "outputs/models/sft-m10r/stage-a"
@@ -56,6 +59,9 @@ PROTECT=(
   "data/sft_curriculum"
   "data/grpo"
   "data/sft"
+  # 探针集（dev-300 与训练集自测卷）：只有 1 MB，但没了就做不了「尺子」层面的任何比较。
+  # 曾经被误判成候选——`--delete` 会把它删掉，所以显式列进来。
+  "data/probes"
 )
 
 is_protected() {
