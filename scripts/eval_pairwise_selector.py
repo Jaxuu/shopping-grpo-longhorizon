@@ -218,6 +218,30 @@ def chat(
     return ""
 
 
+def check_service(base_url: str, api_key: str, model: str, *, timeout: int = 5) -> list[str]:
+    """开跑前确认 :8000 上真有服务、且模型名对得上。返回可用 model id 列表。
+
+    没有这一步，vLLM 没起时会在第一题上抛 40 行 traceback，看不出是「服务没开」
+    还是「脚本有 bug」。失败一律 SystemExit，把该敲的命令打出来。
+    """
+    url = base_url.rstrip("/") + "/models"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise SystemExit(
+            f"连不上 {base_url}（{exc.reason}）—— vLLM 没在跑。\n"
+            "先起服务（2B 权重 4.4GB，约 2–3 分钟；就绪判据是 /v1/models 返回带 id 的 JSON）：\n"
+            "  bash scripts/serve_model.sh outputs/models/sft-m10r/stage-full/merged\n"
+        ) from None
+    ids = [str(item.get("id")) for item in (data.get("data") or []) if item.get("id")]
+    if model not in ids:
+        hint = f"加 --model {ids[0]} 重跑。" if ids else "服务起来了但没加载任何模型。"
+        raise SystemExit(f"服务在跑，但没有模型 {model!r}。实际可用：{ids}\n{hint}")
+    return ids
+
+
 def _top_keys(votes: Mapping[str, int], top_k: int) -> list[str]:
     """票数降序、同票按身份字典序 —— 不依赖 JSON 里的键顺序。"""
     ranked = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
@@ -353,6 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"# 候选比较器：{len(tasks)} 题，取票数前 {args.top_k} 名，模型 {args.model}")
     print()
+    check_service(args.base_url, args.api_key, args.model)
 
     results = run_selector(
         tasks,

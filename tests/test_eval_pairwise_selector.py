@@ -201,3 +201,52 @@ def test_run_selector_skips_tasks_without_detail() -> None:
         verbose=False,
     )
     assert results == []
+
+
+def _fake_models(monkeypatch, *, ids: list[str] | None, error: Exception | None = None) -> None:
+    import io
+    import json as _json
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        if error is not None:
+            raise error
+        return _Response(_json.dumps({"data": [{"id": i} for i in ids or []]}).encode())
+
+    monkeypatch.setattr(pw.urllib.request, "urlopen", fake_urlopen)
+
+
+def test_check_service_returns_ids_when_model_matches(monkeypatch) -> None:
+    _fake_models(monkeypatch, ids=["shopping-agent"])
+    assert pw.check_service("http://x/v1", "k", "shopping-agent") == ["shopping-agent"]
+
+
+def test_check_service_explains_vllm_not_running(monkeypatch) -> None:
+    import urllib.error
+
+    _fake_models(monkeypatch, ids=None, error=urllib.error.URLError("Connection refused"))
+    try:
+        pw.check_service("http://x/v1", "k", "shopping-agent")
+    except SystemExit as exc:
+        message = str(exc)
+        assert "vLLM 没在跑" in message
+        assert "serve_model.sh" in message
+    else:  # pragma: no cover - 必须抛
+        raise AssertionError("vLLM 没起时应该直接退出")
+
+
+def test_check_service_names_available_model(monkeypatch) -> None:
+    _fake_models(monkeypatch, ids=["other-name"])
+    try:
+        pw.check_service("http://x/v1", "k", "shopping-agent")
+    except SystemExit as exc:
+        assert "other-name" in str(exc)
+        assert "--model other-name" in str(exc)
+    else:  # pragma: no cover - 必须抛
+        raise AssertionError("模型名对不上时应该直接退出")
