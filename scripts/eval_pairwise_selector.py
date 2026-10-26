@@ -218,6 +218,17 @@ def chat(
     return ""
 
 
+def require_base_url(base_url: str) -> str:
+    """base_url 为空时给出人话，而不是 `unknown url type: '/models'`。"""
+    if not base_url or not base_url.strip():
+        raise SystemExit(
+            "base_url 是空的：--base-url 收到了空字符串，通常是 $OPENAI_BASE_URL 没设。\n"
+            "本地 vLLM（不需要任何凭据）：--base-url http://127.0.0.1:8000/v1\n"
+            '老师模型：先确认 echo "$OPENAI_BASE_URL" 有值，再 --base-url "$OPENAI_BASE_URL"'
+        )
+    return base_url.strip()
+
+
 def check_service(base_url: str, api_key: str, model: str, *, timeout: int = 5) -> list[str]:
     """开跑前确认 :8000 上真有服务、且模型名对得上。返回可用 model id 列表。
 
@@ -365,6 +376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="跳过 /v1/models 探活（第三方网关不列模型时用）",
     )
     args = parser.parse_args(argv)
+    args.base_url = require_base_url(args.base_url)
 
     headroom = json.loads(args.headroom.read_text(encoding="utf-8"))
     reference_set = set(ens.probe.task_ids_of(args.reference))

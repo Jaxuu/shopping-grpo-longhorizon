@@ -250,3 +250,19 @@ def test_check_service_names_available_model(monkeypatch) -> None:
         assert "--model other-name" in str(exc)
     else:  # pragma: no cover - 必须抛
         raise AssertionError("模型名对不上时应该直接退出")
+
+
+def test_require_base_url_rejects_empty_with_actionable_hint() -> None:
+    for bad in ("", "   "):
+        try:
+            pw.require_base_url(bad)
+        except SystemExit as exc:
+            message = str(exc)
+            assert "OPENAI_BASE_URL" in message
+            assert "http://127.0.0.1:8000/v1" in message
+        else:  # pragma: no cover - 必须抛
+            raise AssertionError("base_url 为空时应该直接退出")
+
+
+def test_require_base_url_strips_surrounding_space() -> None:
+    assert pw.require_base_url(" http://x/v1 ") == "http://x/v1"
