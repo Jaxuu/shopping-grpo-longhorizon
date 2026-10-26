@@ -7,7 +7,14 @@ from pathlib import Path
 
 from shopping_grpo.environment.context import LocalTextTokenCounter
 from shopping_grpo.evaluation.summary import summarize_trajectories
-from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_tasks, load_tasks
+from shopping_grpo.evaluation.rollout import (
+    SYSTEM_PROMPT as FROZEN_SYSTEM_PROMPT,
+    OpenAIChatClient,
+    collect_tasks,
+    load_system_prompt,
+    load_tasks,
+    system_prompt_digest,
+)
 
 
 def parse_args():
@@ -65,7 +72,17 @@ def parse_args():
         default=0,
         help=(
             "诊断开关：买之前必须打开过多少个不同候选，默认 0=关闭。"
-            "开启后评测分数不可与历史 62.0% 直接比较，它只用于测量探索收益上界。"
+            # argparse 会对 help 做 % 格式化，裸百分号必须写成 %%。
+            "开启后评测分数不可与历史 62.0%% 直接比较，它只用于测量探索收益上界。"
+        ),
+    )
+    parser.add_argument(
+        "--system-prompt-file",
+        default="",
+        help=(
+            "系统提示词变体文件（UTF-8 全文）。留空 = 用冻结的 SYSTEM_PROMPT。"
+            "用于「同一权重、只改提示词」的 A/B；换提示词等于换 agent 配置，"
+            "分数不能与冻结口径的历史分数直接比，protocol 里会记指纹。"
         ),
     )
     return parser.parse_args()
@@ -101,6 +118,7 @@ def main():
     observation_token_counter = (
         LocalTextTokenCounter(args.tokenizer_path) if args.tokenizer_path else None
     )
+    system_prompt = load_system_prompt(args.system_prompt_file or None)
     tasks = load_tasks(args.benchmark)
     client = OpenAIChatClient(
         model=args.model,
@@ -126,6 +144,7 @@ def main():
         base_url=args.base_url,
         max_steps=args.max_steps,
         min_opened_before_buy=args.min_opened_before_buy,
+        system_prompt=system_prompt,
     )
     summary = summarize_trajectories(
         [task["task_id"] for task in tasks], _read_jsonl(args.output)
@@ -147,6 +166,10 @@ def main():
         "observation_search_top_k": args.observation_search_top_k,
         "observation_tokenizer": args.tokenizer_path or "vllm:/tokenize",
         "min_opened_before_buy": args.min_opened_before_buy,
+        "system_prompt_file": args.system_prompt_file or "frozen:SYSTEM_PROMPT",
+        "system_prompt_sha256": system_prompt_digest(
+            system_prompt if system_prompt is not None else FROZEN_SYSTEM_PROMPT
+        ),
     }
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

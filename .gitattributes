@@ -7,3 +7,11 @@
 data/**/*.jsonl text eol=lf
 data/**/*.json text eol=lf
 data/**/*.parquet -text
+
+# Shell scripts run on the Linux box; a CRLF checkout turns the shebang into
+# `/usr/bin/env bash\r` and the script dies with "bad interpreter".
+*.sh text eol=lf
+
+# Prompt variants are hashed into the eval protocol; CRLF would change the digest
+# depending on which OS checked the file out.
+configs/prompts/*.txt text eol=lf

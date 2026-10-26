@@ -17,6 +17,14 @@ MIN_OPENED_BEFORE_BUY="${MIN_OPENED_BEFORE_BUY:-0}"
 # 只有做「同一模型多次采样再投票」时才需要调高；调高后单次分数会掉，别拿它比历史。
 TEMPERATURE="${TEMPERATURE:-0.0}"
 TOP_P="${TOP_P:-1.0}"
+# 系统提示词变体。留空 = 用冻结的 SYSTEM_PROMPT（分数与历史可比）。
+# 非空时 = 「同一权重、只改提示词」的 A/B，分数不可与 62.0%/63.5% 直接比，
+# protocol 里会记文件名与指纹。例：SYSTEM_PROMPT_FILE=configs/prompts/query-attributes.txt
+SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-}"
+PROMPT_ARGS=()
+if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
+  PROMPT_ARGS=(--system-prompt-file "$SYSTEM_PROMPT_FILE")
+fi
 # 每题步数上限固定 35，不给环境变量：环境侧 configs/environment.json 的
 # termination.max_steps=35 是冻结契约，SHOP_MAX_STEPS 设成别的值会直接抛 ValueError。
 # 调大这里的值没有意义（环境已经在 35 步终止），调小会让客户端先停而环境不终止，
@@ -34,6 +42,7 @@ cd "$ROOT"
   --api-key "$LLM_API_KEY" \
   --temperature "$TEMPERATURE" \
   --top-p "$TOP_P" \
-  --min-opened-before-buy "$MIN_OPENED_BEFORE_BUY"
+  --min-opened-before-buy "$MIN_OPENED_BEFORE_BUY" \
+  ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"}
 
 "$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"

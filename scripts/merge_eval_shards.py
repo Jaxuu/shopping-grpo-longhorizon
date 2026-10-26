@@ -12,6 +12,11 @@ import argparse
 import json
 from pathlib import Path
 
+from shopping_grpo.evaluation.rollout import (
+    SYSTEM_PROMPT as FROZEN_SYSTEM_PROMPT,
+    load_system_prompt,
+    system_prompt_digest,
+)
 from shopping_grpo.evaluation.summary import summarize_trajectories
 
 
@@ -53,6 +58,8 @@ def merge(
     max_steps: int = 35,
     observation_token_budget: int = 1536,
     observation_tokenizer: str = "local-hf-tokenizer",
+    context_window: int = 0,
+    system_prompt_file: str = "",
 ) -> dict:
     expected = read_expected_ids(benchmark)
     merged = read_shard_trajectories(shard_dir, shards)
@@ -72,11 +79,15 @@ def merge(
         "temperature": 0.0,
         "top_p": 1.0,
         # 远端 API 没有 chat 级 /tokenize，所以关掉上下文预算；observation 截断仍按
-        # 本地 tokenizer 执行，保证与本地模型的截断口径一致。
-        "context_window": 0,
+        # 本地 tokenizer 执行，保证与本地模型的截断口径一致。跑本地 vLLM 时传真实窗口。
+        "context_window": context_window,
         "observation_token_budget": observation_token_budget,
         "observation_tokenizer": observation_tokenizer,
         "shards": shards,
+        "system_prompt_file": system_prompt_file or "frozen:SYSTEM_PROMPT",
+        "system_prompt_sha256": system_prompt_digest(
+            load_system_prompt(system_prompt_file or None) or FROZEN_SYSTEM_PROMPT
+        ),
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -93,6 +104,17 @@ def parse_args(argv=None):
     parser.add_argument("--model", default="unknown")
     parser.add_argument("--max-steps", type=int, default=35)
     parser.add_argument("--observation-token-budget", type=int, default=1536)
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=0,
+        help="与分片评测一致；跑本地 vLLM 时传真实窗口（24576），远端 API 传 0。",
+    )
+    parser.add_argument(
+        "--system-prompt-file",
+        default="",
+        help="与分片评测一致的系统提示变体文件；留空 = 冻结提示。",
+    )
     return parser.parse_args(argv)
 
 
@@ -106,6 +128,8 @@ def main(argv=None):
         model=args.model,
         max_steps=args.max_steps,
         observation_token_budget=args.observation_token_budget,
+        context_window=args.context_window,
+        system_prompt_file=args.system_prompt_file,
     )
     print(
         f"  完成 {summary['completed_tasks']}/{summary['expected_tasks']}，"

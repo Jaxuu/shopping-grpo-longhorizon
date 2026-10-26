@@ -4,6 +4,7 @@
 入口，不负责修改环境仓库或训练模型。
 """
 
+import hashlib
 import json
 import os
 import time
@@ -335,13 +336,18 @@ def collect_for_task(
     tools=None,
     attempt_index=0,
     min_opened_before_buy=0,
+    system_prompt=None,
 ):
     """执行一个任务并返回完整轨迹；所有异常都会被写入轨迹后再释放环境。
 
     ``min_opened_before_buy`` 是诊断开关（默认 0 = 关闭）：大于 0 时，``buy_now``
     在打开过的不同候选数不足之前会被动作守卫拒绝。它只影响"允不允许下单"，
     不改奖励、不改题目、不泄露答案，用于测量「多看几个候选」的收益上界。
+
+    ``system_prompt`` 默认 ``None`` = 用冻结的 ``SYSTEM_PROMPT``。传字符串即替换
+    系统提示，用于「同一权重、只改提示词」的 A/B；轨迹里记指纹，便于事后确认。
     """
+    system_prompt = system_prompt or SYSTEM_PROMPT
     trajectory = {
         "trajectory_id": str(uuid4()),
         "task_id": int(task["task_id"]),
@@ -362,6 +368,7 @@ def collect_for_task(
         "release_error": None,
         "min_opened_before_buy": int(min_opened_before_buy),
         "opened_candidates": [],
+        "system_prompt_sha256": system_prompt_digest(system_prompt),
     }
     env = env_factory(base_url=base_url)
     try:
@@ -376,7 +383,7 @@ def collect_for_task(
                 "instruction", initial.get("observation", "")
             )
         trajectory["initial_result"] = initial
-        messages = _initial_messages(task, initial)
+        messages = _initial_messages(task, initial, system_prompt=system_prompt)
         trajectory["messages"] = messages
         tool_schemas = tools or SHOP_TOOL_SCHEMAS
         consecutive_blocked_calls = 0
@@ -547,6 +554,7 @@ def collect_tasks(
     env_factory=ShopAgentEnv,
     attempts_per_task=1,
     min_opened_before_buy=0,
+    system_prompt=None,
 ):
     attempts_per_task = int(attempts_per_task)
     if attempts_per_task < 1:
@@ -567,6 +575,7 @@ def collect_tasks(
                 max_steps=max_steps,
                 attempt_index=attempt_index,
                 min_opened_before_buy=min_opened_before_buy,
+                system_prompt=system_prompt,
             )
             append_jsonl(output_path, [trajectory])
             written.append(trajectory)
@@ -700,14 +709,34 @@ def _enforce_serial_tool_call(assistant):
     return serial_assistant, list(tool_calls[1:])
 
 
-def _initial_messages(task, initial):
+def system_prompt_digest(text):
+    """系统提示的短指纹；写进轨迹和 protocol，事后能确认这一轮用的是哪版提示。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def load_system_prompt(path):
+    """读取提示词变体文件。
+
+    只给**诊断性 A/B** 用：换提示词会改变 agent 配置，跑出来的分数不能和冻结口径的
+    历史分数直接比，所以调用方必须把它记进 protocol。
+    """
+    if path is None:
+        return None
+    text = Path(path).read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"system prompt file is empty: {path}")
+    return text
+
+
+def _initial_messages(task, initial, system_prompt=None):
+    system_prompt = system_prompt or SYSTEM_PROMPT
     prompt = task.get("prompt")
     if prompt:
         messages = [dict(message) for message in prompt]
     else:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": system_prompt}]
     if not any(message.get("role") == "system" for message in messages):
-        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        messages.insert(0, {"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": initial.get("instruction", "")})
     return messages
 
