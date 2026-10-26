@@ -65,6 +65,9 @@ if [[ ! -f "$TOKENIZER_PATH/tokenizer.json" && ! -f "$TOKENIZER_PATH/tokenizer_c
        它用来给 observation 做截断计数，必须存在。"
 fi
 printf '  tokenizer: %s\n' "$TOKENIZER_PATH"
+# 远端 API 没有 /tokenize，observation 截断计数靠本地 transformers tokenizer。
+"$PY" -c "from transformers import AutoTokenizer" 2>/dev/null \
+  || fail "当前 .venv 里没有 transformers，无法加载本地 tokenizer：bash scripts/setup.sh"
 
 echo
 echo "== 1/6 老师凭据（现在放） =="
