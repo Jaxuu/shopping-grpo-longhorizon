@@ -64,7 +64,8 @@ printf '  模型服务在线：%s\n' "$LLM_BASE_URL"
 if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   [[ -f "$SYSTEM_PROMPT_FILE" ]] || fail "找不到提示词文件 $SYSTEM_PROMPT_FILE"
   printf '  系统提示词：%s\n' "$SYSTEM_PROMPT_FILE"
-  printf '  ⚠ 换提示词 = 换 agent 配置。本轮分数**不能**与 63.5%/62.0% 直接比较，\n'
+  # printf 会对格式串做 % 展开，裸百分号必须写成 %%。
+  printf '  ⚠ 换提示词 = 换 agent 配置。本轮分数**不能**与 63.5%%/62.0%% 直接比较，\n'
   printf '    只能与同一提示词下的对照比。protocol 里会记指纹。\n'
 else
   printf '  系统提示词：冻结版 SYSTEM_PROMPT（分数与历史可比）\n'
