@@ -92,7 +92,13 @@ def bucket_row(row: dict) -> tuple[str, dict]:
         for step in row.get("steps") or []
         if step.get("tool_name") == "search_products"
     ]
-    info = {"gold": gold, "queries": [q for q in queries if q], "ranks": ranks, "opened": opened}
+    info = {
+        "task_id": row.get("task_id"),
+        "gold": gold,
+        "queries": [q for q in queries if q],
+        "ranks": ranks,
+        "opened": opened,
+    }
     if detail.get("reward_type") in SUCCESS_TYPES:
         return "success", info
     if not gold:
@@ -121,6 +127,13 @@ def recall_rank(searcher, queries, gold, depth):
     return best
 
 
+def pages_needed(rank, page_size):
+    """还需要翻几页才看得到这个名次；0 = 第一页就有，None = 不在召回内。"""
+    if rank is None:
+        return None
+    return max(0, (int(rank) - 1) // int(page_size))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trajectories", type=Path)
@@ -128,6 +141,11 @@ def main() -> int:
     parser.add_argument("--recall-depth", type=int, default=150)
     parser.add_argument("--page-size", type=int, default=20)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--detail",
+        action="store_true",
+        help="逐题打印：A 桶每题的 gold 在 BM25 里的名次、需要翻几页才能看到。",
+    )
     args = parser.parse_args()
 
     searcher = load_index(args.index)
@@ -135,16 +153,28 @@ def main() -> int:
     buckets = collections.Counter()
     a_ranks: list[int] = []
     a_missing = 0
+    detail_rows: list[dict] = []
     for row in rows:
         bucket, info = bucket_row(row)
         buckets[bucket] += 1
-        if bucket != "A_never_seen":
-            continue
-        rank = recall_rank(searcher, info["queries"], info["gold"], args.recall_depth)
-        if rank is None:
-            a_missing += 1
-        else:
-            a_ranks.append(rank)
+        rank = None
+        if bucket == "A_never_seen":
+            rank = recall_rank(searcher, info["queries"], info["gold"], args.recall_depth)
+            if rank is None:
+                a_missing += 1
+            else:
+                a_ranks.append(rank)
+        detail_rows.append(
+            {
+                "task_id": info.get("task_id"),
+                "bucket": bucket,
+                "best_rank": rank,
+                # 0 = 第一页就能看到（属于行为问题而不是检索问题）
+                "pages_needed": pages_needed(rank, args.page_size),
+                "opened_gold": bool(info["gold"] and info["gold"] in info["opened"]),
+                "queries": info["queries"],
+            }
+        )
 
     pages = [0, 1, 2, 3, 4, 5]
     reachable = {
@@ -165,6 +195,8 @@ def main() -> int:
             "reachable_by_pages": {f"next_page_x{page}": n for page, n in reachable.items()},
         },
     }
+    if args.detail:
+        summary["detail"] = detail_rows
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
@@ -182,6 +214,18 @@ def main() -> int:
         print(f"  观察只显示前 {args.page_size} 名 ⇒ 这些题「可检索但不可见」")
         for page, count in reachable.items():
             print(f"    翻 {page} 页（看到前 {args.page_size * (page + 1)} 名）：{count} 题")
+    if args.detail:
+        print("\n逐题（只列 A 桶）：")
+        print("| task_id | gold 名次 | 需要翻页数 | 我们的 query |")
+        print("|---:|---:|---:|---|")
+        for row in detail_rows:
+            if row["bucket"] != "A_never_seen":
+                continue
+            print(
+                f"| {row['task_id']} | {row['best_rank'] or '不在召回内'} | "
+                f"{row['pages_needed'] if row['pages_needed'] is not None else '-'} | "
+                f"{' / '.join(row['queries'])} |"
+            )
     return 0
 
 

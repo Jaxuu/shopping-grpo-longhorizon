@@ -38,6 +38,7 @@ def _row(
     search_rows=None,
     opened=(),
     queries=("foo",),
+    task_id=None,
 ):
     steps = []
     for query in queries:
@@ -52,6 +53,7 @@ def _row(
     for asin in opened:
         steps.append({"tool_name": "open_product", "parameters": {"asin": asin}})
     return {
+        "task_id": task_id,
         "steps": steps,
         "terminal_result": {
             "reward_detail": {"reward_type": reward_type},
@@ -131,3 +133,18 @@ def test_recall_rank_returns_none_when_absent():
 def test_recall_rank_ignores_empty_queries():
     searcher = _FakeSearcher({"a": [("11111111", 5)]})
     assert audit.recall_rank(searcher, [None, "", "a"], "11111111", 150) == 5
+
+
+def test_bucket_row_carries_task_id():
+    row = _row(task_id=8187)
+    _, info = audit.bucket_row(row)
+    assert info["task_id"] == 8187
+
+
+def test_pages_needed_maps_rank_to_page_flips():
+    # 第 1 页（1-20）不需要翻页；第 21 名要翻 1 次；第 150 名要翻 7 次。
+    assert audit.pages_needed(1, 20) == 0
+    assert audit.pages_needed(20, 20) == 0
+    assert audit.pages_needed(21, 20) == 1
+    assert audit.pages_needed(150, 20) == 7
+    assert audit.pages_needed(None, 20) is None
