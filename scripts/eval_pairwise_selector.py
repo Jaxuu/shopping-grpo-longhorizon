@@ -339,7 +339,9 @@ def run_selector(
         )
         if verbose:
             mark = "✅" if results[-1]["hit"] else "❌"
-            print(f"{mark} task {task_id} → {choice or '解析失败'}")
+            said = results[-1]["answer"]
+            tail = "" if said == choice else f"  「{said}」"
+            print(f"{mark} task {task_id} → {choice or '解析失败'}{tail}")
     return results
 
 
@@ -357,6 +359,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--min-overlap", type=float, default=0.8)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="跳过 /v1/models 探活（第三方网关不列模型时用）",
+    )
     args = parser.parse_args(argv)
 
     headroom = json.loads(args.headroom.read_text(encoding="utf-8"))
@@ -377,7 +384,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"# 候选比较器：{len(tasks)} 题，取票数前 {args.top_k} 名，模型 {args.model}")
     print()
-    check_service(args.base_url, args.api_key, args.model)
+    if not args.skip_preflight:
+        check_service(args.base_url, args.api_key, args.model)
 
     results = run_selector(
         tasks,
