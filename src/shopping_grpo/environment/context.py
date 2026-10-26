@@ -277,3 +277,27 @@ def _complete_token_group_ends(response_mask):
             index += 1
         group_ends.append(index)
     return group_ends
+
+
+class LocalTextTokenCounter:
+    """Count plain text with a **local** HuggingFace tokenizer.
+
+    为什么需要它：评测远端 API 模型（比如老师 `deepseek-v4-flash`）时没有 vLLM 的
+    `/tokenize` 端点，但 observation 预算必须与本地模型同口径。直接关掉截断会让远端
+    模型看到更多商品信息，分数虚高且不可比。所以这里用本地 tokenizer 计数，
+    保证两边被截断的位置一致。
+    """
+
+    def __init__(self, tokenizer_path=None, *, tokenizer=None, trust_remote_code=True):
+        if tokenizer is None:
+            if not tokenizer_path:
+                raise ValueError("LocalTextTokenCounter 需要 tokenizer_path 或 tokenizer")
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(tokenizer_path), trust_remote_code=trust_remote_code
+            )
+        self.tokenizer = tokenizer
+
+    def __call__(self, text):
+        return len(self.tokenizer.encode(str(text), add_special_tokens=False))

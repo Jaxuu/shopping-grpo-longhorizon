@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+from shopping_grpo.environment.context import LocalTextTokenCounter
 from shopping_grpo.evaluation.summary import summarize_trajectories
 from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_tasks, load_tasks
 
@@ -50,6 +51,15 @@ def parse_args():
     parser.add_argument("--observation-generic-token-budget", type=int, default=768)
     parser.add_argument("--observation-search-top-k", type=int, default=20)
     parser.add_argument(
+        "--tokenizer-path",
+        default="",
+        help=(
+            "本地 HuggingFace tokenizer 目录，用于 observation 预算计数。"
+            "评测远端 API 模型（如老师）时模型服务没有 /tokenize，必须用它才能保持"
+            "与本地模型同口径的截断；留空则维持原行为（走 vLLM /tokenize）。"
+        ),
+    )
+    parser.add_argument(
         "--min-opened-before-buy",
         type=int,
         default=0,
@@ -81,6 +91,16 @@ def main():
         raise SystemExit("--context-window 必须大于 --max-tokens 与安全余量之和")
     if args.observation_token_budget < 0:
         raise SystemExit("--observation-token-budget 不能为负数")
+    if args.tokenizer_path and args.context_window:
+        # 本地 tokenizer 只负责 observation 的纯文本计数；chat 级上下文预算依赖
+        # 服务端的 chat template 渲染，本地复现容易与 vLLM 不一致，所以不混用。
+        raise SystemExit(
+            "--tokenizer-path 只替代 observation 文本计数，不能替代 chat 级上下文计数；"
+            "评测远端 API 模型时请同时传 --context-window 0"
+        )
+    observation_token_counter = (
+        LocalTextTokenCounter(args.tokenizer_path) if args.tokenizer_path else None
+    )
     tasks = load_tasks(args.benchmark)
     client = OpenAIChatClient(
         model=args.model,
@@ -97,6 +117,7 @@ def main():
         observation_detail_token_budget=args.observation_detail_token_budget,
         observation_generic_token_budget=args.observation_generic_token_budget,
         observation_search_top_k=args.observation_search_top_k,
+        observation_token_counter=observation_token_counter,
     )
     collect_tasks(
         tasks,
@@ -124,6 +145,7 @@ def main():
         "observation_detail_token_budget": args.observation_detail_token_budget,
         "observation_generic_token_budget": args.observation_generic_token_budget,
         "observation_search_top_k": args.observation_search_top_k,
+        "observation_tokenizer": args.tokenizer_path or "vllm:/tokenize",
         "min_opened_before_buy": args.min_opened_before_buy,
     }
     args.summary.parent.mkdir(parents=True, exist_ok=True)
