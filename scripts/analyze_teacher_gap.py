@@ -59,6 +59,18 @@ def opened_asins(record: Mapping) -> set[str]:
     } - {"None"}
 
 
+def opened_asins_in_order(record: Mapping) -> list[str]:
+    """按打开顺序去重。用来回答「老师第一个点开的是不是就是对的」。"""
+    seen: list[str] = []
+    for step in record.get("steps") or []:
+        if step.get("tool_name") != "open_product":
+            continue
+        asin = str((step.get("parameters") or {}).get("asin"))
+        if asin and asin != "None" and asin not in seen:
+            seen.append(asin)
+    return seen
+
+
 def search_queries(record: Mapping) -> list[str]:
     return [
         str((step.get("parameters") or {}).get("query"))
@@ -106,6 +118,7 @@ def analyse_task(task_id: int, ours: Mapping | None, teacher: Mapping | None) ->
     group = classify(ours, gold)
     teacher_searches = search_queries(teacher) if teacher else []
     ours_searches = search_queries(ours) if ours else []
+    teacher_open_order = opened_asins_in_order(teacher) if teacher else []
     return {
         "task_id": task_id,
         "group": group,
@@ -120,6 +133,12 @@ def analyse_task(task_id: int, ours: Mapping | None, teacher: Mapping | None) ->
         "teacher_steps": len(teacher.get("steps") or []) if teacher else 0,
         "teacher_hit_at_search": first_search_hit(teacher, gold) if (teacher and gold) else None,
         "teacher_queries": teacher_searches,
+        # 老师点开的顺序与名次：用来判断它的优势是「认得准」还是「逐个核对」。
+        "teacher_open_count": len(teacher_open_order),
+        "teacher_open_ranks": [best_rank(teacher, asin) for asin in teacher_open_order],
+        "teacher_first_open_is_gold": bool(
+            gold and teacher_open_order and teacher_open_order[0] == gold
+        ),
     }
 
 
@@ -137,6 +156,23 @@ def build_report(
         row["teacher_hit_at_search"] for row in a_rows if row["teacher_hit_at_search"]
     )
 
+    # 老师在每组上的做法：只开 1 个、且第一个就是 gold ⇒ 它靠「认得准」而不是「逐个核对」。
+    teacher_style = {}
+    for group in ("A", "B", "C", "D", "E"):
+        group_rows = [row for row in rows if row["group"] == group]
+        if not group_rows:
+            continue
+        teacher_style[group] = {
+            "tasks": len(group_rows),
+            "only_one_open": sum(1 for row in group_rows if row["teacher_open_count"] == 1),
+            "first_open_is_gold": sum(
+                1 for row in group_rows if row["teacher_first_open_is_gold"]
+            ),
+            "open_counts": dict(
+                sorted(Counter(row["teacher_open_count"] for row in group_rows).items())
+            ),
+        }
+
     def _mean(rows: Sequence[Mapping], key: str) -> float:
         values = [float(row[key]) for row in rows if row.get(key) is not None]
         return sum(values) / len(values) if values else 0.0
@@ -147,6 +183,7 @@ def build_report(
         "group_labels": GROUPS,
         "rows": rows,
         "a_teacher_hit_positions": {str(k): v for k, v in sorted(hit_positions.items())},
+        "teacher_style": teacher_style,
         "ours": {
             "mean_searches": _mean(rows, "ours_searches"),
             "mean_steps": _mean(rows, "ours_steps"),
@@ -185,6 +222,24 @@ def render_markdown(report: Mapping) -> str:
         for position, count in report["a_teacher_hit_positions"].items():
             lines.append(f"| 第 {position} 次 | {count} |")
 
+    if report.get("teacher_style"):
+        lines += [
+            "",
+            "## 老师在缺口题上的做法：眼力还是流程",
+            "",
+            "「只开 1 个」和「第一个开的就是 gold」都高 ⇒ 老师靠**认得准**，不是靠逐个核对。",
+            "这种情况下「教学生多开几个比较」是在教一个老师自己都不做的动作。",
+            "",
+            "| 组 | 题数 | 只开 1 个 | 第一个开的就是 gold | 开候选数分布 |",
+            "|:--:|---:|---:|---:|---|",
+        ]
+        for group, style in report["teacher_style"].items():
+            counts = "、".join(f"{k} 个:{v} 题" for k, v in style["open_counts"].items())
+            lines.append(
+                f"| {group} | {style['tasks']} | {style['only_one_open']} | "
+                f"{style['first_open_is_gold']} | {counts} |"
+            )
+
     ours = report["ours"]
     teacher = report["teacher"]
     lines += [
@@ -199,12 +254,12 @@ def render_markdown(report: Mapping) -> str:
         "",
         "## 逐题清单",
         "",
-        "| task_id | 组 | 我们的名次 | 我们买 | gold | 老师搜索 | 老师第几次命中 |",
-        "|---:|:--:|---:|---|---|---:|---:|",
+        "| task_id | 组 | 我们的名次 | 我们买 | gold | 老师搜索 | 老师第几次命中 | 老师开候选 | 老师先开 gold |",
+        "|---:|:--:|---:|---|---|---:|---:|---:|:--:|",
     ]
     for row in report["rows"]:
         lines.append(
-            "| {task_id} | {group} | {rank} | {bought} | {gold} | {searches} | {hit} |".format(
+            "| {task_id} | {group} | {rank} | {bought} | {gold} | {searches} | {hit} | {opens} | {first} |".format(
                 task_id=row["task_id"],
                 group=row["group"],
                 rank=row["ours_best_rank"] if row["ours_best_rank"] is not None else "-",
@@ -212,6 +267,8 @@ def render_markdown(report: Mapping) -> str:
                 gold=row["gold_asin"] or "-",
                 searches=row["teacher_searches"],
                 hit=row["teacher_hit_at_search"] or "-",
+                opens=row["teacher_open_count"],
+                first="是" if row["teacher_first_open_is_gold"] else "否",
             )
         )
     lines.append("")

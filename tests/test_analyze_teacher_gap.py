@@ -115,6 +115,36 @@ def test_render_markdown_lists_groups() -> None:
     assert "| 1 | A |" in text
 
 
+def test_opened_asins_in_order_keeps_first_occurrence() -> None:
+    record = _record(searches=[[GOLD, OTHER]], opens=[OTHER, GOLD, OTHER])
+    assert gap.opened_asins_in_order(record) == [OTHER, GOLD]
+
+
+def test_teacher_style_separates_eye_from_process() -> None:
+    # 老师第一个就点开 gold、只开 1 个 ⇒ 靠「认得准」。
+    direct = gap.analyse_task(1, _record(bought=OTHER, searches=[[OTHER]]), _record(searches=[[GOLD]], opens=[GOLD]))
+    assert direct["teacher_open_count"] == 1
+    assert direct["teacher_first_open_is_gold"] is True
+
+    # 老师先开别的再开 gold ⇒ 靠「逐个核对」。
+    probing = gap.analyse_task(
+        2, _record(bought=OTHER, searches=[[OTHER]]), _record(searches=[[GOLD, OTHER]], opens=[OTHER, GOLD])
+    )
+    assert probing["teacher_open_count"] == 2
+    assert probing["teacher_first_open_is_gold"] is False
+
+    report = gap.build_report(
+        [1, 2],
+        {1: _record(bought=OTHER, searches=[[OTHER]]), 2: _record(bought=OTHER, searches=[[OTHER]])},
+        {1: _record(searches=[[GOLD]], opens=[GOLD]), 2: _record(searches=[[GOLD, OTHER]], opens=[OTHER, GOLD])},
+    )
+    style = report["teacher_style"]["A"]
+    assert style["tasks"] == 2
+    assert style["only_one_open"] == 1
+    assert style["first_open_is_gold"] == 1
+    assert style["open_counts"] == {1: 1, 2: 1}
+
+
 def test_main_writes_outputs(tmp_path) -> None:
     teacher_dir = tmp_path / "teacher"
     ours_dir = tmp_path / "ours"
