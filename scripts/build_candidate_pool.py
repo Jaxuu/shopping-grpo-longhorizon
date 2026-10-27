@@ -55,7 +55,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "environments" / "ShopSimulator" / "shop_env" / "data" / "fine_items_eval_train_all.json.gz"
 EVAL_TASKS = ROOT / "data" / "evaluation" / "tasks.jsonl"
 GRPO_DIR = ROOT / "data" / "grpo"
-SFT_DIR = ROOT / "data" / "sft_m10r"
 USER_PREFIX = "Instruction: "
 
 # 默认要排除的池子。都是「模型已经见过或已经打过标」的题。
@@ -96,17 +95,35 @@ def ids_from_parquet(path: Path) -> set[int]:
         import pyarrow.parquet as pq  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - 环境缺 pyarrow
         raise SystemExit(f"需要 pyarrow：{exc}") from exc
-    table = pq.read_table(path)
-    names = set(table.schema.names)
+    # 只读需要的那一列：SFT 池的 parquet 带完整 messages，整表读会白等几十秒。
+    parquet_file = pq.ParquetFile(path)
+    names = set(parquet_file.schema_arrow.names)
     if "task_id" in names:
-        return {int(value) for value in table.column("task_id").to_pylist() if value is not None}
+        column = parquet_file.read(columns=["task_id"]).column("task_id").to_pylist()
+        return {int(value) for value in column if value is not None}
     if "extra_info" in names:
+        column = parquet_file.read(columns=["extra_info"]).column("extra_info").to_pylist()
         ids = set()
-        for row in table.column("extra_info").to_pylist():
+        for row in column:
             if isinstance(row, dict) and row.get("task_id") is not None:
                 ids.add(int(row["task_id"]))
         return ids
     raise SystemExit(f"{path} 里既没有 task_id 也没有 extra_info.task_id")
+
+
+def sft_pool_files() -> list[Path]:
+    """所有 `data/sft*` 目录下的 parquet。
+
+    曾经只写死 `data/sft_m10r`，结果服务器上还有 `data/sft`、`data/sft_curriculum`、
+    `data/sft_pure_v4` 三个池子，全被漏掉 —— 那批题模型已经背过，混进候选池会给出
+    虚假的「有对有错」。
+    """
+    data_dir = ROOT / "data"
+    found: list[Path] = []
+    for pattern in ("sft*/*.parquet", "sft*/**/*.parquet"):
+        found.extend(sorted(data_dir.glob(pattern)))
+    # 去重（两个 pattern 可能命中同一文件）并保持稳定顺序
+    return sorted({path for path in found if path.is_file()})
 
 
 def collect_used_ids(extra: list[Path]) -> tuple[set[int], list[tuple[str, int]]]:
@@ -114,8 +131,7 @@ def collect_used_ids(extra: list[Path]) -> tuple[set[int], list[tuple[str, int]]
     used: set[int] = set()
     detail: list[tuple[str, int]] = []
     paths = list(DEFAULT_EXCLUDE)
-    if SFT_DIR.is_dir():
-        paths.extend(sorted(SFT_DIR.rglob("*.parquet")))
+    paths.extend(sft_pool_files())
     paths.extend(extra)
 
     for path in paths:
@@ -197,7 +213,9 @@ def main(argv: list[str] | None = None) -> int:
     print("\n排除来源：")
     for name, count in detail:
         if count:
-            print(f"  {name:<48} +{count}")
+            print(f"  {name:<52} +{count}")
+    sft_files = sft_pool_files()
+    print(f"  （SFT 池扫到 {len(sft_files)} 个 parquet，其 task_id 已并入上面的去重集合）")
 
     if args.n > len(candidates):
         raise SystemExit(f"要抽 {args.n} 道，但候选只有 {len(candidates)} 道")
