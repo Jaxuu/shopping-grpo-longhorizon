@@ -130,7 +130,7 @@ if ((failed > 0)); then
 fi
 
 echo
-echo "== 3/6 合并 200 题 =="
+echo "== 3/6 合并 =="
 merge_args=(
   --benchmark "$BENCHMARK"
   --shard-dir "$SHARD_DIR"
@@ -150,7 +150,22 @@ echo "== 4/6 报告 =="
 echo
 echo "== 5/6 与基线逐题对比 =="
 base_path=""
-if [[ -z "$BASELINE_SUMMARY" ]]; then
+run_tasks=$("$PY" - "$OUT/summary.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(int(summary.get("expected_tasks") or 0))
+PY
+)
+# 只有「Final-200 口径 + 温度 0」才是评测。打标采样和小样本跑了也不能跟冠军比，
+# 否则会印出「146/401 比 147/200 差 -1 题」这种分母不一致的假结论。
+if [[ "$TEMPERATURE" != "0.0" ]]; then
+  printf '  采样温度 %s ≠ 0 ⇒ 打标采样，不参与基线对比。\n' "$TEMPERATURE"
+elif [[ "$run_tasks" != "200" ]]; then
+  printf '  本轮 %s 题，不是 Final-200 口径 ⇒ 不参与基线对比。\n' "$run_tasks"
+elif [[ -z "$BASELINE_SUMMARY" ]]; then
   BASELINE_SUMMARY=$("$PY" - "$ROOT" "$LABEL" <<'PY'
 import json
 import sys
@@ -174,7 +189,9 @@ print(best[1] if best else "")
 PY
 )
 fi
-if [[ -z "$BASELINE_SUMMARY" ]]; then
+if [[ "$TEMPERATURE" != "0.0" || "$run_tasks" != "200" ]]; then
+  :  # 上面已经说明跳过，这里什么都不做
+elif [[ -z "$BASELINE_SUMMARY" ]]; then
   printf '  没找到可对比的 200 题 summary。用 BASELINE_SUMMARY=outputs/evaluation/<目录>/summary.json 指定。\n'
 else
   base_path="$BASELINE_SUMMARY"
@@ -202,8 +219,12 @@ try:
 except Exception:
     pass
 got = int(run["strict_successes"])
-print(f"  本轮 {got}/{run['expected_tasks']} = {run['strict_success_rate'] * 100:.1f}%")
-if base and int(base.get("expected_tasks") or 0) == 200:
+total = int(run.get("expected_tasks") or 0)
+rate = float(run.get("strict_success_rate") or 0.0)
+print(f"  本轮 {got}/{total} = {rate * 100:.1f}%")
+if total != 200:
+    print(f"  本轮 {total} 题，不是 Final-200 口径 ⇒ 不做基线比较（打标/小样本不参与冠军判定）。")
+elif base and int(base.get("expected_tasks") or 0) == 200:
     was = int(base["strict_successes"])
     print(f"  基线 {was}/200 = {was / 200 * 100:.1f}%   差 {got - was:+d} 题")
     print(f"  二项噪声 σ ≈ 6.9 题：|差| < 7 题时只能说「同一水平」，不能说「涨了」")

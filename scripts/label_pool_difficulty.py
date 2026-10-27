@@ -225,6 +225,8 @@ def cmd_select(args: argparse.Namespace) -> int:
         print("  dry-run：只统计分桶，未写文件")
         return 0
 
+    if args.output is None:
+        raise SystemExit("非 dry-run 时必须给 --output")
     if not kept_rows:
         raise SystemExit("筛选结果为空：检查 --min-correct / --max-correct，或轮数是否太少")
 
@@ -277,7 +279,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="评测产物目录（可重复，一次一轮）",
     )
-    select.add_argument("--output", type=Path, required=True)
+    select.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="筛选后的 parquet；--dry-run 时可以不给",
+    )
     select.add_argument("--min-correct", type=int, default=1)
     select.add_argument(
         "--max-correct",
