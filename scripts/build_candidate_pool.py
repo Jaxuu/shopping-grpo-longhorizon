@@ -112,17 +112,22 @@ def ids_from_parquet(path: Path) -> set[int]:
 
 
 def sft_pool_files() -> list[Path]:
-    """所有 `data/sft*` 目录下的 parquet。
+    """所有 `data/sft*` 目录下的 parquet / jsonl。
 
     曾经只写死 `data/sft_m10r`，结果服务器上还有 `data/sft`、`data/sft_curriculum`、
-    `data/sft_pure_v4` 三个池子，全被漏掉 —— 那批题模型已经背过，混进候选池会给出
-    虚假的「有对有错」。
+    `data/sft_pure_v4` 三个池子；改完 glob 又发现那四个目录里**一个 parquet 都没有**，
+    SFT 池实际是 jsonl —— 那批题模型已经背过，混进候选池会给出虚假的「有对有错」。
     """
     data_dir = ROOT / "data"
     found: list[Path] = []
-    for pattern in ("sft*/*.parquet", "sft*/**/*.parquet"):
+    for pattern in (
+        "sft*/*.parquet",
+        "sft*/**/*.parquet",
+        "sft*/*.jsonl",
+        "sft*/**/*.jsonl",
+    ):
         found.extend(sorted(data_dir.glob(pattern)))
-    # 去重（两个 pattern 可能命中同一文件）并保持稳定顺序
+    # 去重（多个 pattern 可能命中同一文件）并保持稳定顺序
     return sorted({path for path in found if path.is_file()})
 
 
