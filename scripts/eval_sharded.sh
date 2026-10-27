@@ -31,6 +31,9 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
 CONTEXT_WINDOW="${CONTEXT_WINDOW:-24576}"
 SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-}"
 BASELINE_SUMMARY="${BASELINE_SUMMARY:-}"
+# 采样温度。评测一律 0.0（与历史 63.5%/63.0% 同口径）；只有「给训练池打难度标签」
+# 那种需要多条不同轨迹的场景才调高，此时分数**没有可比性**，只是分桶用的原始样本。
+TEMPERATURE="${TEMPERATURE:-0.0}"
 
 # LABEL 决定产物目录；用提示词变体时不给 LABEL，就按文件名自动起名，
 # 避免手滑把变体写进冠军目录、把 63.5% 覆盖掉。
@@ -70,6 +73,11 @@ if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
 else
   printf '  系统提示词：冻结版 SYSTEM_PROMPT（分数与历史可比）\n'
 fi
+printf '  采样温度：%s\n' "$TEMPERATURE"
+if [[ "$TEMPERATURE" != "0.0" ]]; then
+  printf '  ⚠ 温度非 0 ⇒ 本轮**不是评测**，只是给训练池打难度标签的采样。\n'
+  printf '    分数不可与 63.5%%/63.0%% 比较，也不要写进冠军记录。\n'
+fi
 
 echo
 echo "== 1/6 切片（$SHARDS 份） =="
@@ -97,7 +105,7 @@ for ((i = 0; i < SHARDS; i++)); do
     --llm-base-url "$LLM_BASE_URL"
     --api-key "$LLM_API_KEY"
     --context-window "$CONTEXT_WINDOW"
-    --temperature 0.0
+    --temperature "$TEMPERATURE"
     --top-p 1.0
     --max-steps 35
   )
