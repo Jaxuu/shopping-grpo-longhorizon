@@ -20,6 +20,12 @@
 
 教师轨迹与 LoRA SFT → veRL 在线 GRPO → Final-200 Clean Benchmark 的可审计对比
 
+<br />
+
+**当前成绩：Qwen3.5-2B + LoRA SFT + GRPO = 128 / 200（64.0%）**
+　·　相对 2B 未后训练基线 **0.0%** 提升 64 个百分点
+　·　相对纯 SFT（63.5%）再 **+1 题**，且**零回退**（做对的题是 SFT 的严格超集）
+
 </div>
 
 ![Shopping GRPO project overview](docs/images/project-overview-pipeline.png)
@@ -76,9 +82,11 @@ Environment v2.1 中采集：
 
 - 共获得 2,498 条原始任务轨迹；
 - 每条轨迹在采集时都真实执行环境动作，再按 Reward v3 终局结果验收；
-- 其中 1,026 条通过严格验收，本次固定使用 1,000 条；
-- 最终划分为 800 条训练数据和 200 条验证数据，并与 GRPO、Final-200 Clean
-  保持 task_id 零重叠。
+- 其中 1,026 条通过严格验收，构成 SFT 基础池；
+- 本项目在此基础上做了两轮数据重构（见下方「12 个阶段做了什么」），最终池
+  **1,210 条**（train 1,089 / val 121），其中 **144 条（11.9%）含 `next_page`
+  翻页示范**——这是 SFT 从 60.5% 提到 63.5% 的主要手段；
+- 所有池与 GRPO 训练池、Final-200 Clean 评测集保持 task_id 零重叠。
 
 仓库已提供可断点续跑的采集入口：
 
@@ -160,52 +168,144 @@ Pro 看不到 Reward 分数、Gold 商品私有字段、raw Observation、成功
 
 ## 实验结果
 
-当前 Final-200 Clean 上新增了一次贡献者复现实验；完整协议、失败分布和产物哈希见
-[评测更新记录](docs/evaluation-updates.md)：
+所有结果都在 **Final-200 Clean** 上测：200 道留出任务、每题 1 次确定性 rollout
+（temperature 0）、严格口径只认 `gold_purchase` 终局。完整协议、失败分布和产物哈希见
+[评测更新记录](docs/evaluation-updates.md)。
 
-| 模型 | 严格成功率 | 购买成功率 | 完成终局率 | 平均 Reward |
-|---|---:|---:|---:|---:|
-| Qwen3.8-27B（BF16 权重，关闭思考） | 73.0% | 73.0% | 99.5% | 0.6354 |
+### 主线成绩
 
-以下是历史 Final-200 的归档结果；当前横向比较统一使用 Final-200 Clean：
+| 模型 | 严格成功率 | 相对上一行 | 产物 |
+|---|---:|---:|---|
+| Qwen3.5-2B Baseline（未后训练） | 0.0% | — | — |
+| + LoRA SFT（初版） | 60.5% | +60.5pp | `experiments/sft/` |
+| + LoRA SFT（行为覆盖重构，M10-R v2） | **63.5%（127/200）** | +3.0pp | `sft-m10r/stage-full/merged` |
+| **+ GRPO（中等题池，M12，50 步）** | **64.0%（128/200）** | **+0.5pp** | `grpo-m12-merged` |
+| `deepseek-v4-flash`（教师，参考上界） | 73.5%（147/200） | — | — |
+| Qwen3.8-27B（参考，非本项目产出） | 73.0% | — | — |
 
-| 模型 | 严格成功率 | 购买成功率 | 平均 Reward |
-|---|---:|---:|---:|
-| Qwen3.5-2B Baseline | 0.0% | 0.0% | -0.1105 |
-| LoRA SFT | 60.5% | 60.5% | 0.4729 |
-| GRPO step 100 | 62.0% | 62.5% | 0.5158 |
+### GRPO 的逐题增量（本项目最核心的结论）
 
-SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜索和正确终止；GRPO 在此
-基础上进一步减少错误购买、循环和非法动作。机器可读的训练配置、结果摘要和限制说明
-位于 [`experiments/`](experiments/)。
+| 项 | 题数 |
+|---|---:|
+| GRPO 做对 | **128** |
+| SFT 基线做对 | 127 |
+| 两边都对 | 127 |
+| **只有 GRPO 对** | **1** |
+| **只有 SFT 对** | **0** |
+
+**GRPO 做对的 128 题是 SFT 127 题的严格超集**——它没有牺牲任何一道原来做对的题，
+而是净增 1 题。这是本项目 12 个阶段里**第一次出现非零增量**：此前的 3 轮 GRPO
+要么打平（M6）、要么崩掉（M6-R）、要么退化 1 题（M11 探针，做对的 126 题是基线的
+真子集）。
+
+> **诚实说明**：+1 题落在二项噪声内（σ ≈ 6.9 题）。**总分层面 64.0% 与 63.5% 不可区分**，
+> 能站住的表述是「独有正确题从 0 变成 1」，而不是「成功率提升了 0.5 个百分点」。
+> 要在统计上区分，需要 ≥134 题（+7）。
+
+### 这 0.5 个百分点是怎么来的
+
+GRPO 前两轮空转的真因在训练日志里：`group/all_equal_ratio` **0.25–0.50**、
+`no_purchase_success_ratio` **0.375–0.75** ⇒ 四分之一到一半的组「4 条轨迹全对」
+或「4 条全错」，组内优势恒为 0，**这批题只耗算力不产方向**。
+
+M12 的做法是**只换训练数据**：用两轮采样给候选池打难度标签，只保留「4 条轨迹里
+对 1–3 条」的**中等题**（223 道），其余超参一个不动。结果：
+
+| 指标 | 换池前 | 换池后 |
+|---|---:|---:|
+| `no_purchase_success_ratio`（全错组） | 0.375–0.75 | **0.00** |
+| `all_equal_ratio`（零梯度组） | 0.25–0.50 | 0.25 |
+| Final-200 | 127 | **128** |
+
+**全错组被彻底清零**，这是「换池子」生效的直接证据。残留的 0.25 全部是「全对组」——
+中等题在训练中会退化成简单题，这是该路线的天然上限。
+
+### 试过但没走通的路（同样是资产）
+
+| 方向 | 结果 |
+|---|---|
+| 换 GRPO 配方（lr 5e-6 → 2e-5） | val 低于起点，step 48 熔断 |
+| 推理期强制「买前开 k 个候选」 | 同批 9 题 **7/9 → 0/9**（p≈0.016），方向否决 |
+| 教模型「翻页」（144 条合成示范） | 63.5%，但该翻的题只翻 7 道；逐回合补理由反而掉到 61.5% |
+| 换系统提示词改查询 | 127/200，净 0（5 换 5 双向抵消） |
+| 换难题池（201 道 gold 在 20 名外的题） | 63.5%，逐题只改 2 道 ⇒ 空转 |
+| Reward v5（`wrong_purchase` 改 band） | Gate 3 梯度份额 0.3% ≪ 门槛 5%，未开训 |
+
+完整的失败归因、判读铁律与硬约束见 [`docs/project-history.md`](docs/project-history.md)
+与 [`docs/lessons-learned.md`](docs/lessons-learned.md)。机器可读的训练配置、结果摘要
+和限制说明位于 [`experiments/`](experiments/)。
+
+### 12 个阶段做了什么
+
+| 阶段 | 内容 | 结果 |
+|---|---|---|
+| **M1** 可解性审计 | 三层审计（有解性 / 检索可达性 / 评分可评性），23,421 条语料 | 建立准入契约，200 题冻结 |
+| **M2–M4** 数据与奖励 | 补采、Reward v4、数据重建 | SFT 池成形，四池 task_id 零重叠 |
+| **M5** SFT 消融 | assistant vs tool-call-only loss | **62.0%**（tool-call-only 胜，选为 GRPO 起点） |
+| **M6 / M6-R** GRPO | 按作者配方 / 把 lr 提到 2e-5 | 62.0% 打平 / step 48 熔断 |
+| **M7** Reward v5 | `wrong_purchase` 由常数改 band | Gate 3 梯度份额 0.3% ≪ 5%，**未开训** |
+| **M8** 多候选核验 | 计划补 100 条多开轨迹 | 靶点被离线解剖否决，**未开训** |
+| **M9** 推理期强制探索 | 买前必须打开 k 个候选 | 同批 9 题 **7/9 → 0/9**，方向否决 |
+| **M10 / M10-R** SFT 重构 | 补翻页 / 候选筛选 / 超预算示范 | **63.5%（127/200）**，最长一段时间的冠军 |
+| **M10-H** GRPO 难题池 | 201 道「gold 在 20 名外」的题并入池，100 步 | 63.5%，逐题只改 2 道 ⇒ 空转 |
+| **M11** 查询提示词 A/B | 只改系统提示词第 3 条 | 127/200，净 0（5 换 5 抵消） |
+| **M12** 中等题 GRPO | 223 道「4 条里对 1–3 条」的题，50 步 | **64.0%（128/200），首次非零增量** |
 
 ## 训练硬件与耗时
 
-所有训练均使用单张 NVIDIA RTX 6000（96 GB）完成。
+### GRPO（veRL 0.8，单卡）
 
-### SFT LoRA 训练（448 条训练数据，3 个 epoch）
+**显存是硬门槛。** M12 实测（50 步）：
 
-| 阶段 | 耗时 | 峰值显存 |
-|---|---:|---:|
-| 单个 epoch（56 步） | ~62 分钟 | 89 GiB |
-| 完整 3 个 epoch | ~3 小时 | 89 GiB |
+| 项 | 实测值 |
+|---|---:|
+| `actor/perf/max_memory_allocated_gb` | **41.3 GB** |
+| `actor/perf/max_memory_reserved_gb` | **57.1 GB** |
 
-### GRPO 训练（veRL 0.8，8 个环境 worker）
+⇒ **48 GB 卡装不下**（可用 47.9 GB）。历史上在 48 GB 上冒烟过，峰值 47,641 / 48,507
+= 98.2%，崩在 `logprobs_from_logits → F.log_softmax`（词表 248,320 的输出层是元凶）。
+**最低 64 GB，推荐 80 GB 以上**，并且必须设 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`。
 
-| 步数范围 | 单步耗时 | 累计耗时 |
-|---|---:|---:|
-| step 0–24 | ~140 秒/步（含 Ray 启动开销） | ~56 分钟 |
-| step 20–30 稳定后 | ~73–120 秒/步 | ~2 分钟/步稳定态 |
-| 100 步（报告 checkpoint） | ~110 秒/步均值 | ~3–4 小时 |
-| 完整 500 步 | ~100 秒/步 | ~14 小时 |
+| 阶段 | 耗时 |
+|---|---:|
+| vLLM 初始化（此阶段 GPU util=0 属正常） | 20–25 分钟 |
+| 单步（`timing_s/step`） | **140–149 秒** |
+| ├ 其中 `update_actor` | **103–105 秒** |
+| ├ 其中 `gen`（rollout） | 12–19 秒 |
+| └ 其中 `save_checkpoint` | 17 秒 |
+| **50 步合计（含初始化）** | **2 小时 23 分钟** |
+
+**墙钟瓶颈在 actor 更新，不在 rollout**——缩短 response 或加大 batch 都省不了多少。
+
+### 评测（与训练分开跑）
+
+2B 模型的评测显存需求远低于训练，**48 GB 卡足够**。但有一条硬约束：
+**不能用 Blackwell / sm_120 的卡**（如 RTX 6000D）。torch 的 CUDA < 12.9 会让
+`vllm serve` 报 `FlashInfer requires sm75 or higher`，评测根本起不来。
+本项目因此把训练与评测拆到两台机器上做。
+
+| 环节 | 耗时 |
+|---|---:|
+| vLLM 加载合并后的权重 | 20–25 分钟 |
+| Final-200 评测（8 分片并发） | **约 25 分钟** |
+| 合并 FSDP checkpoint（11 GB → 4.2 GB 权重） | 约 15 分钟 |
+
+### SFT（LoRA）
+
+| 项 | 实测 |
+|---|---:|
+| 单步 | ~74 秒 |
+| 总步数 | 133（kept 1,061 条 ÷ batch 8） |
+| 完整训练 | ~2.7 小时 |
 
 ### 其他环节
 
 | 环节 | 耗时估算 |
 |---|---:|
 | Teacher 采集（2,498 条原始轨迹） | 取决于接口并发与限流 |
+| 给 1,000 道题打难度标签（2 轮，8 并发） | **约 4 小时** |
 | 200 任务评测（Base） | ~20 分钟 |
-| 200 任务评测（SFT/GRPO） | ~40–60 分钟 |
+| 200 任务评测（SFT/GRPO） | ~25 分钟 |
 | LLM Judge 评分 200 条轨迹 | ~30–60 分钟 |
 
 ## 环境要求
@@ -213,9 +313,11 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 - Linux；
 - NVIDIA GPU 和兼容的 CUDA Driver；
 - [`uv`](https://docs.astral.sh/uv/)；
-- 大约 25 GB 可用磁盘空间，用于依赖、模型权重和运行产物；
-- SFT 配置按照 48 GB 显存设计；
-- GRPO 配置按照单张 96 GB GPU 验证。
+- 约 **60 GB** 可用磁盘空间（依赖、模型权重、运行产物；**每个 GRPO checkpoint 约 11 GB**）；
+- **SFT**：48 GB 显存足够；
+- **GRPO**：最低 **64 GB**，推荐 **80 GB 以上**（实测 `allocated 41.3 GB` / `reserved 57.1 GB`）；
+- **评测**：48 GB 足够，但**不能用 Blackwell / sm_120 的卡**（torch CUDA < 12.9 会让
+  `vllm serve` 报 `FlashInfer requires sm75 or higher`）。
 
 主训练环境使用 Python 3.12，ShopSimulator 使用隔离的 Python 3.10 环境。
 `scripts/setup.sh` 会通过 `uv` 创建并安装两套环境。
@@ -283,13 +385,46 @@ bash scripts/grpo.sh --dry-run
 bash scripts/grpo.sh
 ```
 
+复现 M12（当前冠军）的完整配置：
+
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+bash scripts/grpo.sh \
+  --model outputs/models/sft-m10r/stage-full/merged \
+  --train-data data/grpo/train_medium.parquet \
+  --output outputs/models/grpo-m12 \
+  -- \
+  data.max_response_length=16384 \
+  actor_rollout_ref.actor.calculate_entropy=false \
+  actor_rollout_ref.rollout.enforce_eager=true \
+  data.train_batch_size=4 \
+  actor_rollout_ref.actor.clip_ratio_high=0.28 \
+  actor_rollout_ref.actor.optim.lr=1.0e-5 \
+  trainer.total_training_steps=50 \
+  trainer.save_freq=25 trainer.test_freq=25
+```
+
+几个**必设**项，不是可选项：
+
+| 参数 | 理由 |
+|---|---|
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | 不设会显著抬高 `reserved`，48–64 GB 卡直接 OOM |
+| `actor.calculate_entropy=false` | bypass 模式下算熵会 OOM，且该指标不出现 |
+| `rollout.enforce_eager=true` | 规避部分新卡的 FlashInfer 兼容问题 |
+| `train_batch_size=4` | 每次更新喂 8 条序列（4×4÷2）；batch 2 效果等价但更慢（227 vs 189 s/更新） |
+
 根据验证集指标选择 Checkpoint，并导出 veRL Actor：
 
 ```bash
 bash scripts/export_grpo.sh \
-  outputs/models/grpo/global_step_100/actor \
+  outputs/models/grpo/global_step_50/actor \
   outputs/models/grpo-merged
 ```
+
+> **续训**：数据不变时加 `--resume`（保留优化器状态与 dataloader 位置）；
+> **换训练数据时必须重起**（新输出目录 + 用已合并的权重当 `--model`），
+> 因为 checkpoint 里的 `data.pt` 是旧数据集的 sampler 状态。
 
 启动并评估导出的模型：
 
@@ -335,7 +470,7 @@ Reward v3 是一个确定性的终局 Reward，不依赖另一个大模型进行
 ```text
 configs/                         当前 GRPO、AgentLoop 和工具配置
 data/
-  sft/                           800 条训练 + 200 条验证轨迹
+  sft/                           SFT 轨迹（基础池 1,026 条 → 本项目重构为 1,210 条：1,089 / 121）
   grpo/                          JSONL 与 veRL Parquet 数据
   evaluation/                    Final-200 Clean 留出任务
 docs/                            数据、SFT、GRPO、评估与 Reward 文档
@@ -382,6 +517,13 @@ bash scripts/grpo.sh --logger swanlab
 
 ## 文档导航
 
+**先读这两份**：
+
+- [项目历程与问题台账](docs/project-history.md) — 时间线、12 个阶段的完整结果、负结果归因、判据体系
+- [经验台账](docs/lessons-learned.md) — 已关闭的路、判读铁律、硬约束、工程坑
+
+分阶段文档：
+
 - [数据采集与数据来源](docs/data-collection.md)
 - [LoRA SFT](docs/sft.md)
 - [使用 veRL 进行 GRPO](docs/grpo.md)
@@ -393,12 +535,40 @@ bash scripts/grpo.sh --logger swanlab
 
 ## 后续改进计划
 
-为进一步提升模型在长程购物任务中的规划、工具调用与约束满足能力，后续将从以下几个方面推进项目：
+### 1. 先做归因，不要先加训练量（零显卡成本）
 
-- **扩大模型规模**：在现有实验基础上，训练更大规模的 `Qwen3.5-9B` 模型，评估模型规模对长程任务稳定性和最终成功率的影响。
-- **升级 Teacher 模型与轨迹采集方案**：不再依赖单一 Teacher 模型，计划采用 `Qwen3.8 Flash`、`GLM-5.3-Flash` 和 `DeepSeek-V4-Flash-0731` 的混合方案进行轨迹收集，以提升训练数据的覆盖范围、行为多样性与质量上限。
-- **扩大独立验证集**：增加验证任务数量和任务类型，覆盖更多商品类别、约束组合与交互路径，从而提高实验结论的统计可靠性和泛化评估能力。
-- **引入更细粒度的信用分配**：针对长程交互中终局奖励稀疏、动作贡献难以区分的问题，采用更细粒度的信用分配方法，为关键中间步骤提供更有效的训练信号。
+教师 `deepseek-v4-flash` 是 **147/200**，我们 128/200，**两边并集 165/200 = 82.5%**
+⇒ 这不是全面落后，而是互补盲区。真正的增量空间在 **38 道「我们错、老师对」的题**上：
+
+| 失败模式 | 题数 |
+|---|---:|
+| A 正确商品没进检索结果 | 13 |
+| B 商品在结果里但没打开 | 15 |
+| **C 打开过还买错** | **0** |
+| D 买对商品但选错规格 | 9 |
+| E 没买 | 1 |
+
+**C = 0 说明「打开哪一个」是唯一决策点**——一旦打开对了，就不会买错。
+下一步应先离线归因这 38 题（只读已有轨迹，不需要显卡），再决定改数据还是改奖励。
+
+### 2. 扩池要按真实预算做
+
+中等题（4 条轨迹里对 1–3 条）只占候选池的 **14%–17%**，而打标 1,000 道题 2 轮需要
+**约 4 小时**。⇒ **要 200 道新的中等题，得打标 1,200 道**（4 小时）+ 训练 4.7 小时。
+任何「扩池」计划都应该按这个预算规划，而不是「抽 200 道就行」。
+
+### 3. 评测集的信噪比才是天花板
+
+200 题的二项噪声 **σ ≈ 6.9 题**，意味着**任何小于 7 题的改进都无法在统计上被证实**。
+本项目最后两轮的真实增益是 +1 题和 +3 题，都淹没在噪声里。
+**扩充评测集（或对同一模型多次采样取均值）比继续微调更能提高结论的可信度。**
+
+### 4. 其他方向
+
+- **扩大模型规模**：2B 在需要商品知识的题上（例如判断该补哪个规格词）有结构性劣势，
+  参数量可能是真正的杠杆点。
+- **更细粒度的信用分配**：终局奖励稀疏，关键中间步骤（「打开第几个候选」）拿不到信号。
+- **混合 Teacher**：单一教师的行为覆盖有限，多教师混合可以扩大行为分布。
 
 ## Star History
 
