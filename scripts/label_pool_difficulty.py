@@ -261,9 +261,94 @@ def cmd_select(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge(args: argparse.Namespace) -> int:
+    """把多个「中等题」池子合成一个训练池。
+
+    为什么不用 `pyarrow.concat_tables` 直接拼：两个池子的来源不同
+    （`build_grpo_hard_pool.py` 造的 hard50、`build_candidate_pool.py` 造的 candidate1k），
+    列集合可能差一列，硬拼会悄悄丢列或补 null。这里先严格比 schema，不一致就报错并
+    打出差异，让人自己决定怎么对齐 —— 训练池 schema 错一次，要等 3 小时才发现。
+    """
+    try:
+        import pyarrow as pa  # noqa: PLC0415
+        import pyarrow.parquet as pq  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit(f"需要 pyarrow：{exc}") from exc
+
+    tables = []
+    for path in args.parquet:
+        path = Path(path).expanduser().resolve()
+        table = pq.read_table(path)
+        print(f"  {path}  {table.num_rows} 行  列={table.schema.names}")
+        tables.append((path, table))
+
+    base_names = tables[0][1].schema.names
+    for path, table in tables[1:]:
+        if table.schema.names != base_names:
+            only_base = [n for n in base_names if n not in table.schema.names]
+            only_this = [n for n in table.schema.names if n not in base_names]
+            raise SystemExit(
+                f"schema 不一致，拒绝合并：{path}\n"
+                f"  只在第一个池子里有：{only_base}\n"
+                f"  只在这个池子里有：{only_this}\n"
+                f"  先确认哪边是对的，别硬拼 —— 列错一次要等训练跑完才发现。"
+            )
+        # 同名列但类型不同（比如 task_id int64 vs int32）也要拦
+        for field in tables[0][1].schema:
+            other = table.schema.field(field.name)
+            if field.type != other.type:
+                raise SystemExit(
+                    f"列 {field.name} 类型不一致：{field.type} vs {other.type}（{path}）"
+                )
+
+    rows: list[dict] = []
+    for path, table in tables:
+        rows.extend(table.to_pylist())
+
+    ids = [row_task_id(row) for row in rows]
+    if len(set(ids)) != len(ids):
+        counts: dict[int, int] = defaultdict(int)
+        for task_id in ids:
+            counts[task_id] += 1
+        dupes = sorted(task_id for task_id, n in counts.items() if n > 1)
+        raise SystemExit(f"合并后 task_id 重复 {len(dupes)} 个：{dupes[:10]}")
+
+    # 与评测集/验证集零重叠检查：训练池混进评测题 = 分数直接虚高
+    for forbidden_path in (ROOT / "data" / "evaluation" / "tasks.jsonl",
+                           ROOT / "data" / "grpo" / "validation.jsonl"):
+        if not forbidden_path.is_file():
+            continue
+        forbidden: set[int] = set()
+        if forbidden_path.suffix == ".parquet":
+            for row in pq.read_table(forbidden_path).to_pylist():
+                forbidden.add(row_task_id(row))
+        else:
+            for line in forbidden_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    forbidden.add(int(json.loads(line)["task_id"]))
+        overlap = sorted(set(ids) & forbidden)
+        if overlap:
+            raise SystemExit(
+                f"与 {forbidden_path.name} 重叠 {len(overlap)} 题：{overlap[:10]}\n"
+                f"  训练池不能含评测题，否则分数不可比。"
+            )
+        print(f"  与 {forbidden_path.name} 重叠 0 题 ✓")
+
+    out = args.output.expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=tables[0][1].schema), out)
+    print(f"\n合并 {len(tables)} 个池子 → {out}  共 {len(rows)} 题")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+
+    merge = sub.add_parser("merge", help="合并多个中等题池，校验 schema 与 task_id 唯一")
+    merge.add_argument("--parquet", type=Path, action="append", required=True)
+    merge.add_argument("--output", type=Path, required=True)
+    merge.set_defaults(func=cmd_merge)
 
     export = sub.add_parser("export", help="训练池 parquet → 评测集格式 task_id 清单")
     export.add_argument("--parquet", type=Path, required=True)
