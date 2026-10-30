@@ -30,6 +30,12 @@ solves is a strict superset of the set SFT solves
 
 </div>
 
+> **This repository is a fork of [YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon).**
+> The upstream author built the codebase, data protocol, Reward v3 and the Final-200 Clean
+> benchmark; this fork adds twelve stages (M1–M12) of training-recipe optimisation and
+> per-task evaluation. See [project history](docs/project-history.md) for results and
+> negative findings. Upstream attribution is at the end of this file.
+
 ![Shopping GRPO project overview](docs/images/project-overview-pipeline.png)
 
 ## What is ShopSimulator?
@@ -45,8 +51,8 @@ therefore requires more than producing a plausible answer: the agent must gather
 evidence, obey constraints, choose the correct variant and terminate correctly.
 
 The frozen Environment v2.1 source and product archive are embedded under
-[`environments/ShopSimulator/`](environments/ShopSimulator/), so the tutorial
-does not depend on a separately running third-party repository.
+[`environments/ShopSimulator/`](environments/ShopSimulator/), so this repository
+does not depend on a separately running third-party project.
 
 ![ShopSimulator overview](docs/images/shopsimulator-overview.png)
 
@@ -55,7 +61,7 @@ does not depend on a separately running third-party repository.
 | Stage | What happens | Entry point | Details |
 |---|---|---|---|
 | Baseline | Evaluate the untouched base model | `bash scripts/baseline.sh` | [Evaluation](docs/evaluation.md) |
-| SFT | Learn tool use from accepted teacher trajectories | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
+| SFT | Learn tool use from accepted teacher trajectories | `bash scripts/sft_curriculum.sh` | [SFT](docs/sft.md) |
 | GRPO | Optimize terminal Reward v3 with online rollouts | `bash scripts/grpo.sh` | [GRPO](docs/grpo.md) |
 | Evaluation | Run the curated Final-200 Clean protocol | `bash scripts/evaluate.sh NAME` | [Evaluation](docs/evaluation.md) |
 
@@ -78,7 +84,8 @@ flowchart LR
 
 ### How the SFT data was collected
 
-The current collection used `deepseek-v4-flash` as a teacher in ShopSimulator
+The current collection used `deepseek-v4-flash` as a teacher (official alias, routed to
+**DeepSeek-V4.1-Flash**) in ShopSimulator
 Environment v2.1. It produced 2,498 raw trajectories, of which 1,026 passed the
 strict acceptance filter. This project then ran two data-rebuild rounds (see
 [project history](docs/project-history.md)), ending with a **1,210-row pool**
@@ -153,6 +160,139 @@ historical static view is available in the [Final-200 Benchmark Dashboard](docs/
 > showing teacher data collection, LoRA SFT, online GRPO rollouts and the shared
 > held-out evaluation path, with artifacts produced at each boundary.
 
+## Differences from upstream: what changed and what did not
+
+This repository is a fork of
+[YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon),
+diverging at upstream `449bba2` (2026-09-22). **Upstream already ships a complete training
+recipe** — a three-stage SFT curriculum, GRPO dynamic sampling, Reward v3 and the Final-200
+Clean benchmark. The work here is incremental on top of that recipe, not a rebuild.
+
+Every row below can be checked against the upstream files.
+
+### Teacher model (unchanged)
+
+| Item | Value | Upstream source |
+|---|---|---|
+| Model | `deepseek-v4-flash` (official alias, routed to **DeepSeek-V4.1-Flash**) | `docs/data-collection.md` |
+| Endpoint | `https://api.deepseek.com/v1` via `OPENAI_BASE_URL` / `OPENAI_API_KEY` | same |
+| Sampling temperature | 0.0 | same |
+| Acceptance | every trajectory really executes environment actions, then is strictly accepted on the Reward v3 terminal result | same |
+| Yield | 2,498 raw trajectories → 1,026 accepted (41.1%) | same |
+
+> Collection must use the literal `deepseek-v4-flash`, not the current official name
+> `deepseek-flash`: the client prefix-matches `deepseek-v4` to decide whether to send
+> `thinking: disabled`. Renaming silently falls back to the default thinking mode, which drops
+> `reasoning_content` across turns and breaks tool calling.
+
+### Not changed
+
+| Category | Content | Upstream source |
+|---|---|---|
+| Environment | ShopSimulator Environment v2.1 source and the 23,421-product corpus | `environments/ShopSimulator/` |
+| Protocol | tool schema v2, observation v2, frozen `SYSTEM_PROMPT` | `configs/tools.json`, `configs/prompts/` |
+| Benchmark | `data/evaluation/tasks.jsonl`, 200 tasks, one deterministic rollout each | same file upstream |
+| Evaluation settings | temperature 0.0, `max_steps=35`, top-20 rendered results, BM25 recall 150 | `docs/evaluation.md` |
+| **SFT three-stage curriculum** | A→B→C, 1 epoch per stage, lr **1e-4 → 7e-5 → 5e-5**, LoRA re-opened on the previous stage's merged weights | `data/sft_curriculum/manifest.json`, `docs/sft.md` |
+| **SFT structural hyperparameters** | LoRA r=16 / α=32 / dropout 0.05, `max_length=24576`, batch 1 × grad-accum 8, SDPA, gradient checkpointing | `docs/sft.md` |
+| **GRPO group size and sampling** | `n=4`, rollout temperature 0.7 / top-p 0.9 | `configs/grpo.yaml`, `docs/grpo.md` |
+| Reward decision logic | hard gates (category + budget), `0.35/0.25/0.25/0.15` weighting, discrete terminal table | `docs/reward-v3.md` |
+
+**The three-stage curriculum, the LoRA structure and the group size are all upstream designs;
+this fork did not change them.**
+
+### What changed
+
+**1. Reward: v3 → v4 (M3); v5 written but never enabled (M7)**
+
+| Version | Change | Effect on Final-200 score |
+|---|---|---|
+| **v4** | ① Budget parser rewritten: Chinese numerals (including elided forms like 两千五), colloquial units (块/块钱/圆), unprefixed ranges, 万 abbreviations, full-width and `\xa0` normalisation; price-context gating rejects false hits such as `SPF50+`, `6g`, `60厘米`. ② Two **information-only layers**: soft price proximity and process evidence `shopping-process-evidence-v1` | **None.** Hard-gate semantics are byte-identical; both layers only write to `evidence` and never enter the terminal decision. Budget parse rate on the benchmark is 93.5% |
+| **v5** | `wrong_purchase` from a constant −0.85 to the band `[−0.85, −0.66]`, varying with `match_score` × budget proximity | **None, and never used for a final model**: Gate 3 measured a gradient share of 0.3% against a 5% threshold, so M7 was closed |
+
+In one line: **we changed whether budgets parse correctly and whether the training signal is
+fine-grained enough — not what counts as a correct purchase.**
+
+**2. SFT: larger pool, new supervision scope, extra final leg for the champion**
+
+The curriculum and its hyperparameters follow upstream; what changed is which rows are read
+and which tokens are supervised:
+
+| Item | Upstream | This fork |
+|---|---|---|
+| Main pool `data/sft_pure_v4/all.jsonl` | **1,192 rows** | **1,252 rows** (M2 top-up collection + M4 rebuild) |
+| Manifest split | train 1,073 / val 119 | train 1,126 / val 126 |
+| Three-stage curriculum | A→B→C, 1 epoch each, lr 1e-4→7e-5→5e-5 | **identical** (epochs/lr in the manifest untouched) |
+| Behavioural coverage | dominated by "search once → open the first → buy" (89.2%) | M10-R adds 144 rows (11.9%) of `next_page` demonstrations, plus returning to an earlier candidate and rejecting over-budget items; pool 1,210 rows (1,089 / 121) |
+| Loss scope | global assistant (natural-language `content` also supervised) | new per-turn `--loss-scope` switch; the champion uses `tool-call-only` (M5 ablation: 62.0% vs 59.0%) |
+| Champion's final leg | curriculum ends at stage C | M10-R v2 adds **1 epoch at lr 5e-5** on top of `stage-c/merged`, reaching 63.5% |
+
+**3. GRPO: new training pool plus six overrides**
+
+Upstream `configs/grpo.yaml` and `docs/grpo.md` agree on the values, so the "Upstream" column
+below is the real value in both places:
+
+| Parameter | Upstream | Used here | Reason |
+|---|---|---|---|
+| Training pool `data/grpo/train.jsonl` | **1,000 tasks** | 906 after the M4 rebuild → M12 **223 medium-difficulty tasks** (1–3 successes out of 4 rollouts) | all-correct / all-wrong groups have zero within-group advantage and only burn compute |
+| `train_batch_size` | 2 | **4** | both feed 8 sequences per update (4×4÷2 = 2×4÷1); equivalent learning, but 4 is faster (189 vs 227 s/update) |
+| `max_response_length` | 20480 | **16384** | measured `response_length/max = 7500`, never saturated; saves ~25% memory |
+| `optim.lr` | **1e-6** | **1e-5** | 1e-6 does not move the model (M6 was a zero result); at 1e-5 `ppo_kl` rises monotonically from 0.0038 to 0.0055 |
+| `clip_ratio_high` | 0.20 | **0.28** | asymmetric with `clip_ratio_low`, loosening positive updates |
+| `calculate_entropy` | true (logging only, not in the loss) | **false** | under bypass it both OOMs and never emits the metric |
+| `total_training_steps` | 500 | **50** | 223 tasks × 50 steps × batch 4 = 200 prompt-passes ≈ 0.9 epochs |
+| `save_freq` / `test_freq` | 50 / 50 | **25 / 25** | 50 steps only yields two checkpoints; 25-step granularity makes the mid-run validation visible |
+| `rollout.n` (group size) | 4 | **4 (unchanged)** | changing it changes the algorithm itself |
+
+**4. Evaluation harness: upstream has only a single-process entry point**
+
+| Script | Purpose |
+|---|---|
+| `scripts/eval_sharded.sh` | shards the 200 tasks across 8 workers; resumes from completed tasks; merges → report → **per-task diff against a named baseline** |
+| `scripts/compare_teacher_vs_ours.py` | per-task comparison of any two `summary.json` files, emitting the gap list and behaviour contrast |
+| `scripts/label_pool_difficulty.py` | labels a pool with "how many of N rollouts succeeded" and keeps only medium-difficulty tasks |
+| `scripts/build_candidate_pool.py` | samples unused corpus rows while enforcing zero task-id overlap with SFT / GRPO / benchmark |
+
+Three guards live in the scripts rather than in prose: subtracting from a historical baseline
+is **refused** when temperature is non-zero or the run is not 200 tasks; `LABEL=` must be
+explicit (otherwise a champion directory gets overwritten); `BASELINE_SUMMARY=` must be
+explicit (auto-selection picks the highest-scoring directory, which may not be the intended one).
+
+### Comparability: what can and cannot be compared
+
+**Final scores are comparable.** Benchmark, environment, tools, system prompt, temperature and
+step cap are all frozen, with one deterministic rollout per task — the same exam paper.
+
+**Per-change attribution is not.** Upstream's 60.5% → 62.0% and this fork's 62.0% → 64.0%
+differ in **several** variables (SFT pool, GRPO pool, reward version), so it is not valid to
+claim "our GRPO is 2 points better than the author's". Attribution inside this fork is
+closed-loop: each stage moves one variable under the same reward.
+
+| Model | SFT pool | GRPO pool | Reward | Strict success |
+|---|---|---|---|---:|
+| Qwen3.5-2B untrained | — | — | v3 | 0.0% |
+| **Upstream** LoRA SFT | 1,192 | — | v3 | 60.5% |
+| **Upstream** GRPO step 100 | 1,192 | 1,000 | v3 | 62.0% |
+| This fork M5-B (three-stage curriculum, loss=tool-call-only) | 1,252 | — | v3+v4 | 62.0% |
+| **This fork M10-R v2 (best SFT)** | 1,210 | — | v4 | **63.5%** |
+| **This fork M12 (SFT + GRPO)** | 1,210 | 223 medium | v4 | **64.0%** |
+| Qwen3.8-27B (reference, not produced here) | — | — | v3 | 73.0% |
+
+End-to-end gain is **+2.0pp / +4 tasks** (62.0% → 64.0%), which as noted is not a
+single-variable result. **The only attributable increment is M12's per-task 1-in / 0-out**,
+described in the next section.
+
+### Test history
+
+Twelve stages (M1 solvability audit → M12 medium-difficulty GRPO); the per-stage
+"what was done / result / artifacts" table is in the Chinese README and in
+[project history §2](docs/project-history.md). **Eight of them are negative results**
+(M6 zero gain, M6-R divergence, M7 Gate 3 failure, M8 target invalidated offline,
+M9 direction rejected, M10-R v3 regression, M10-H hard-pool idling, M11 query A/B
+cancelling 5-for-5) — those carry more information than the scores.
+
+---
+
 ## Results
 
 All numbers are on **Final-200 Clean**: 200 held-out tasks, one deterministic
@@ -215,6 +355,38 @@ hyperparameter stayed fixed.
 swap worked. The residual 0.25 are all *all-correct* groups: medium-difficulty
 tasks degrade into easy ones during training. That is the structural ceiling of
 this route.
+
+### Training reward does rise — but that is fitting, not capability
+
+This is the most easily misread part of the project, so it gets its own section.
+Reward metrics **rise sharply** during training:
+
+| Metric | step 25 | step 50 | Change |
+|---|---:|---:|---:|
+| `reward/shaped_mean` (= `critic/score/mean`) | 0.177 | **0.356** | **+101%** |
+| `reward/purchase_success_rate` (training set) | 0.500 | **0.563** | +12.5% rel. |
+| `reward/strict_mean` | 0.500 | 0.563 | +12.5% rel. |
+| val mean@1 (49 held-out tasks) | 0.4477 | **0.4972** | +11.1% rel. |
+| **Final-200 (the actual exam)** | — | **127 → 128** | **+0.8% rel.** |
+
+**Three levels of decay, each an order of magnitude**: training reward +101% →
+held-out val +11% → real exam +0.8%.
+
+Why, level by level:
+
+1. **`shaped_mean` doubling is mostly *not* "more tasks solved"** — it is the
+   disappearance of the **−0.85 all-wrong groups**. A wrong purchase costs
+   −0.85; with all-wrong groups falling from 37%–75% to zero, the mean is
+   mechanically lifted. That is a structural change, not capability growth.
+2. **Training-set purchase success 0.5 → 0.563 (+6.3pp) is a real improvement**,
+   but only on the distribution of **223 medium-difficulty tasks**.
+3. **Only +1 task transfers to Final-200.** Those 223 tasks were selected by
+   labelling with the *then-current* model; learning them well is partly "learn
+   the tasks that were labelled learnable", not "get better on unseen tasks".
+
+⇒ **Reward is a training signal, not a capability measure.** That is why every
+conclusion in this project rests on Final-200 alone — not on training reward and
+not on val (the M11 probe gained +12.3% on val while losing one task on Final-200).
 
 ### Paths tried and closed
 
@@ -353,11 +525,21 @@ Stop the model server before training so it releases the GPU.
 
 ### 4. Train and evaluate SFT
 
+The main path is the three-stage curriculum (A→B→C, 1 epoch each, lr 1e-4→7e-5→5e-5):
+
 ```bash
-bash scripts/sft.sh
-bash scripts/serve_model.sh outputs/models/sft-merged
+# print the six train/merge commands without loading a model
+bash scripts/sft_curriculum.sh --dry-run
+
+# actual training
+bash scripts/sft_curriculum.sh
+
+bash scripts/serve_model.sh outputs/models/sft-curriculum/stage-c/merged
 bash scripts/evaluate.sh sft
 ```
+
+`scripts/sft.sh` is the single-stage entry point (`data/sft/` 1,000 rows, 3 epochs, lr 1e-4).
+It exists only to reproduce the historical 60.5% baseline and is not the main path.
 
 Stop the model server again before GRPO.
 
@@ -393,9 +575,9 @@ bash scripts/evaluate.sh grpo
 Generated checkpoints, rollouts and logs are written under `outputs/`, which is
 ignored by Git.
 
-## Reward V3 overview
+## Reward design (v3 → v4)
 
-Reward v3 is a deterministic terminal reward; it does not rely on another
+The decision rule is a deterministic terminal reward; it does not rely on another
 language model for subjective judgment:
 
 - category and budget are hard gates;
@@ -411,24 +593,32 @@ language model for subjective judgment:
 
 ![Reward V3 decision rules](docs/images/reward-v3-decision-rules.png)
 
+**This fork made exactly two changes to the reward, neither touching the decision above:**
+
+| Version | Change | Effect on scores |
+|---|---|---|
+| v4 (M3) | budget parser rewritten (Chinese numerals, colloquial units, 万 abbreviations, full-width whitespace, price-context gating) plus two information-only layers (soft price proximity, process evidence) | none — hard gates are byte-identical, the new layers only write to `evidence` |
+| v5 (M7) | `wrong_purchase` moved from a constant −0.85 to the `[−0.85, −0.66]` band | none, and never enabled (Gate 3 gradient share 0.3% < 5%) |
+
 The complete formula, termination rules and evidence requirements are in the
-[Reward v3 design guide](docs/reward-v3.md).
+[Reward v3 design guide](docs/reward-v3.md); the rationale for each change is in
+[Reward v4](docs/reward-v4.md) and [Reward v5](docs/reward-v5.md).
 
 ## Repository map
 
 ```text
 configs/                         current GRPO, AgentLoop and tool configuration
 data/
-  sft/                           800 train + 200 validation trajectories
+  sft/                           SFT trajectories (1,026-row base pool, rebuilt here to 1,210: 1,089 / 121)
   grpo/                          ready-to-train JSONL and veRL Parquet
   evaluation/                    curated Final-200 Clean held-out set
-docs/                            one guide for each tutorial stage and Reward v3
+docs/                            data, SFT, GRPO, evaluation and Reward documentation
 environments/ShopSimulator/      embedded environment and product archive
 experiments/
   baseline/                      baseline config and result summary
   sft/                           SFT config and result summary
   grpo/                          GRPO config and result summary
-scripts/                         thin user-facing tutorial entry points
+scripts/                         thin user-facing entry points
 src/shopping_grpo/
   collection/                    Teacher acceptance and SFT data construction
   environment/                   HTTP client, tools, actions and observations
@@ -513,12 +703,34 @@ right product is opened, the model does not mis-buy. The next step should be an
 offline attribution pass over these 38 tasks (reads existing trajectories only,
 no GPU), before deciding whether to change data or reward.
 
-### 2. Budget pool expansion realistically
+### 2. Pool expansion can work, but it is an arms race
 
-Medium-difficulty tasks (1–3 successes out of 4 rollouts) are only **14%–17%** of
-the candidate pool, and labelling 1,000 tasks for 2 rounds takes **~4 hours**.
-⇒ **200 new medium-difficulty tasks require labelling 1,200 tasks** (4 h) plus
-4.7 h of training. Plan accordingly — "just sample 200 more" does not work.
+**Why it could work (mechanism, not guesswork)**: after 0.9 epochs over the 223
+tasks, `all_equal_ratio` stalls at **0.25**, and the residual is entirely
+*all-correct* groups — medium-difficulty tasks degrade into easy ones. Adding
+**new** medium-difficulty tasks pushes that ratio back down and lets more compute
+produce a useful gradient.
+
+**Why it could fail**: the "medium" label on new tasks is produced by the
+*current* champion. After training, the model is stronger and those new tasks
+degrade too. ⇒ Expansion is not a one-off fix; **every round needs fresh
+labelling**, and the cost grows with each round.
+
+**Real budget**: medium-difficulty tasks are only **14%–17%** of the candidate
+pool, and labelling 1,000 tasks for 2 rounds takes **~4 hours**.
+⇒ **200 new medium tasks = 1,200 labelled (4 h) + 4.7 h training ≈ 9 hours.**
+
+**Where the ceiling is**: of the 72 tasks Final-200 still fails, only **38 are
+solvable by the teacher** (`deepseek-v4-flash`); the other 34 it also fails.
+⇒ **The realistic target of expansion is not 65%, but approaching
+128 + 38 = 166/200 = 83%** (minus the ~20 unsolvable tasks in the benchmark, so
+the true ceiling is lower).
+
+**My read**: expansion is the only route with a mechanism behind it, but it is an
+arms race — ~9 hours per 200 medium tasks buys one more round of useful gradient,
+not a permanent gain. **Do the attribution in item 1 first**: determine whether
+those 38 tasks fail because of missing training coverage or because of the 2B
+capability limit, then decide whether expansion is worth funding.
 
 ### 3. Evaluation noise is the actual ceiling
 
@@ -536,9 +748,18 @@ than further fine-tuning does.**
   steps ("open the n-th candidate") receive no signal.
 - **Mixed teachers**: a single teacher has limited behavioral coverage.
 
-## References and acknowledgements
+## Upstream project and acknowledgements
 
-This tutorial builds on the
+This repository is a fork of
+[YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon).
+The upstream project provides the infrastructure this work builds on: the ShopSimulator
+environment wrapper, tool schema, data protocol, Reward v3, the Final-200 Clean benchmark
+and the veRL training scaffold. **The changes here are confined to the post-training
+recipe and the data pools** (SFT data reconstruction, a medium-difficulty GRPO pool,
+evaluation scripts and per-task attribution tooling). Environment, reward and evaluation
+protocol are untouched, so scores remain directly comparable across both repositories.
+
+Upstream itself builds on the
 [ShopSimulator paper](https://arxiv.org/pdf/2601.18225) and source project,
 [veRL](https://github.com/verl-project/verl), and
 [Qwen](https://github.com/QwenLM/Qwen3).
@@ -548,13 +769,21 @@ The evaluation protocol and Benchmark construction were also informed by
 and
 [EComAgentBench: Benchmarking Shopping Agents on Long-Horizon Tasks with Distributed Hidden Intent](https://arxiv.org/pdf/2606.17698).
 
-The repository organization and tutorial presentation were informed by
+The repository organisation was informed by
 [qiqihezh/agentic-grpo-longhorizon](https://github.com/qiqihezh/agentic-grpo-longhorizon).
-Thanks to the [OpenCode Go plan](https://dev.opencode.ai/go) for supporting the
+Thanks to the [OpenCode Go plan](https://dev.opencode.ai/go) for supporting the upstream
 development workflow.
 
 ### Contributors
 
+**Upstream author**
+
 <a href="https://github.com/Guochangwei917">
   <img src="https://github.com/Guochangwei917.png?size=80" width="80px;" alt="Guochangwei917"/>
+</a>
+
+**Maintained in this fork**
+
+<a href="https://github.com/Jaxuu">
+  <img src="https://github.com/Jaxuu.png?size=80" width="80px;" alt="Jaxuu"/>
 </a>

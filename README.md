@@ -28,6 +28,11 @@
 
 </div>
 
+> **本仓库是 [YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon) 的 fork。**
+> 代码框架、数据协议、Reward v3 与 Final-200 Clean 评测集由原作者建立；本仓库在此基础上完成了
+> M1–M12 共十二个阶段的训练配方优化与逐题评测（过程与负结果见[项目历史](docs/project-history.md)）。
+> 上游署名与致谢见文末。
+
 ![Shopping GRPO project overview](docs/images/project-overview-pipeline.png)
 
 ## ShopSimulator 是什么？
@@ -71,14 +76,14 @@ flowchart LR
 | 阶段 | 目标 | 入口 | 详细文档 |
 |---|---|---|---|
 | Baseline | 测量原始 Qwen3.5-2B 的工具使用能力 | `bash scripts/baseline.sh` | [评估](docs/evaluation.md) |
-| SFT | 从高质量教师轨迹学习合法、完整的购物行为 | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
+| SFT | 从高质量教师轨迹学习合法、完整的购物行为 | `bash scripts/sft_curriculum.sh` | [SFT](docs/sft.md) |
 | GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` | [GRPO](docs/grpo.md) |
 | Evaluation | 使用同一批 Final-200 Clean 留出任务公平比较模型 | `bash scripts/evaluate.sh NAME` | [评估](docs/evaluation.md) |
 
 ### SFT 数据是怎么收集的？
 
-当前数据使用 `deepseek-v4-flash` 作为教师模型，在 ShopSimulator
-Environment v2.1 中采集：
+当前数据使用 `deepseek-v4-flash` 作为教师模型（官方别名，路由到
+**DeepSeek-V4.1-Flash**），在 ShopSimulator Environment v2.1 中采集：
 
 - 共获得 2,498 条原始任务轨迹；
 - 每条轨迹在采集时都真实执行环境动作，再按 Reward v3 终局结果验收；
@@ -166,6 +171,128 @@ Pro 看不到 Reward 分数、Gold 商品私有字段、raw Observation、成功
 
 
 
+## 与上游的差异：改了什么、没改什么
+
+本仓库 fork 自 [YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon)，
+分叉点是上游 `449bba2`（2026-09-22）。**上游已经交付了一套完整的训练配方**——三阶段 SFT 课程、
+GRPO 动态采样、Reward v3、Final-200 Clean 评测集。本项目的改动是在这套配方上做增量，
+而不是重搭一套。
+
+下面每一条都可对照上游文件核验。
+
+### 教师模型（未改）
+
+| 项 | 取值 | 上游依据 |
+|---|---|---|
+| 模型 | `deepseek-v4-flash`（官方别名，路由到 **DeepSeek-V4.1-Flash**） | `docs/data-collection.md` |
+| 端点 | `https://api.deepseek.com/v1`，凭据 `OPENAI_BASE_URL` / `OPENAI_API_KEY` | 同上 |
+| 采样温度 | 0.0 | 同上 |
+| 验收 | 每条轨迹真实执行环境动作，再按 Reward v3 终局结果严格验收 | 同上 |
+| 产出 | 2,498 条原始轨迹 → 1,026 条通过（41.1%） | 同上 |
+
+> 采集时必须写 `deepseek-v4-flash` 这个字面量，不能换成官方现名 `deepseek-flash`：
+> 客户端靠前缀匹配 `deepseek-v4` 来决定是否显式发送 `thinking: disabled`。改名会让模型
+> 回落到默认思考模式，多轮对话不回传 `reasoning_content`，工具调用随即崩掉。
+
+### 没改的
+
+| 类别 | 内容 | 上游依据 |
+|---|---|---|
+| 环境 | ShopSimulator Environment v2.1 源码与 23,421 条商品语料 | `environments/ShopSimulator/` |
+| 协议 | 工具 schema v2、observation v2、冻结版 `SYSTEM_PROMPT` | `configs/tools.json`、`configs/prompts/` |
+| 评测集 | `data/evaluation/tasks.jsonl` 200 题，每题 1 次确定性 rollout | 上游同文件 |
+| 评测口径 | 温度 0.0、`max_steps=35`、渲染前 20 名、BM25 召回 150 | `docs/evaluation.md` |
+| **SFT 三阶段课程** | A→B→C，每阶段 1 epoch，lr **1e-4 → 7e-5 → 5e-5**，阶段间在上一阶段 merged 上重开 LoRA | `data/sft_curriculum/manifest.json`、`docs/sft.md` |
+| **SFT 结构超参** | LoRA r=16 / α=32 / dropout 0.05、`max_length=24576`、per-device batch 1 × 梯度累积 8、SDPA、梯度检查点 | `docs/sft.md` |
+| **GRPO 组大小与采样** | `n=4`、rollout 温度 0.7 / top-p 0.9 | `configs/grpo.yaml`、`docs/grpo.md` |
+| 奖励判定逻辑 | hard gate（类别 + 预算）、四维加权 `0.35/0.25/0.25/0.15`、终局离散查表 | `docs/reward-v3.md` |
+
+**三阶段课程、LoRA 结构、组大小这三项都是上游原设计，本项目没有改动。**
+
+### 改了什么
+
+**1. 奖励函数：v3 → v4（M3），v5 写了但未启用（M7）**
+
+| 版本 | 改动内容 | 是否影响 Final-200 分数 |
+|---|---|---|
+| **v4** | ① 预算解析器重写：中文数字（含「两千五」这类省略末尾单位）、口语单位（块/块钱/圆）、无前缀区间、万缩写、全角与 `\xa0` 空白归一化；价格语境门控拒绝 `SPF50+`、`6g`、`60厘米` 这类误匹配。② 新增两个**纯信息层**：soft 价格接近度、过程证据 `shopping-process-evidence-v1` | **不影响**。hard gate 语义逐字节不变，信息层只写入 `evidence`，不参与终局判定。评测集预算解析率 93.5% |
+| **v5** | `wrong_purchase` 由常数 −0.85 改为 band `[−0.85, −0.66]`，按 `match_score` × 预算接近度连续取值 | **不影响，且从未进入最终训练**：Gate 3 实测梯度份额仅 0.3%（门槛 5%），M7 直接关闭 |
+
+一句话：**改的是「预算能不能正确解析」和「训练信号是否够细」，没改「什么算买对」。**
+
+**2. SFT：池子扩容 + 新增监督口径 + 冠军末段微调**
+
+课程结构与超参沿用上游，改的是「读哪些行」和「监督哪几个 token」：
+
+| 项 | 上游 | 本项目 |
+|---|---|---|
+| 主池 `data/sft_pure_v4/all.jsonl` | **1,192 行** | **1,252 行**（M2 补采 + M4 重建） |
+| manifest 划分 | train 1,073 / val 119 | train 1,126 / val 126 |
+| 三阶段课程 | A→B→C，每阶段 1 epoch，lr 1e-4→7e-5→5e-5 | **完全相同**（manifest 的 epochs/lr 未改） |
+| 行为覆盖 | 以「搜 1 次 → 开第 1 个 → 买」为主（89.2%） | M10-R 追加 144 条（11.9%）`next_page` 翻页示范、候选筛选后回头买、超预算排除；池 1,210 行（1,089 / 121） |
+| Loss 口径 | 全局 assistant（自然语言 content 也计入 loss） | 新增 `--loss-scope` 逐回合开关；冠军用 `tool-call-only`（M5 消融：62.0% vs 59.0%） |
+| 冠军末段 | 课程到 stage C 结束 | M10-R v2 在 `stage-c/merged` 上再做 **1 epoch、lr 5e-5**，得 63.5% |
+
+**3. GRPO：换训练池 + 六个 override**
+
+上游 `configs/grpo.yaml` 与 `docs/grpo.md` 的取值一致，下表「上游」列即这两处的实际值：
+
+| 参数 | 上游 | 本项目实际 | 理由 |
+|---|---|---|---|
+| 训练池 `data/grpo/train.jsonl` | **1,000 题** | M4 重建后 906 题 → M12 **223 道中等题**（4 条轨迹里对 1–3 条） | 全对/全错组组内优势恒 0，只耗算力不产方向 |
+| `train_batch_size` | 2 | **4** | 每次更新都喂 8 条序列（4×4÷2 = 2×4÷1），学习等价但 4 更快（189 vs 227 s/更新） |
+| `max_response_length` | 20480 | **16384** | 实测 `response_length/max = 7500`，从未用满，省 25% 显存 |
+| `optim.lr` | **1e-6** | **1e-5** | 1e-6 推不动（M6 零增益），1e-5 下 `ppo_kl` 从 0.0038 单调升到 0.0055 |
+| `clip_ratio_high` | 0.20 | **0.28** | 与 `clip_ratio_low` 非对称，放宽正向更新 |
+| `calculate_entropy` | true（仅记录，不进 loss） | **false** | bypass 模式下既 OOM 又不产生该指标 |
+| `total_training_steps` | 500 | **50** | 223 题 × 50 步 × batch 4 = 200 题次 ≈ 走 0.9 遍 |
+| `save_freq` / `test_freq` | 50 / 50 | **25 / 25** | 50 步只留 2 个 checkpoint，25 步粒度才看得到中途 val |
+| `rollout.n`（组大小） | 4 | **4（未改）** | 改它会改变算法本身 |
+
+**4. 评测 harness：上游只有单进程入口，本项目新增分片与归因工具**
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/eval_sharded.sh` | 200 题切 8 片并发；断点续跑（已完成题跳过）；自动合并 → 报告 → **与指定基线逐题差集** |
+| `scripts/compare_teacher_vs_ours.py` | 任意两份 `summary.json` 逐题对比，输出缺口题清单与行为对照 |
+| `scripts/label_pool_difficulty.py` | 多轮采样给训练池打「对几条」难度标签，只保留中等题 |
+| `scripts/build_candidate_pool.py` | 从未用过的语料行抽候选题，并强制与 SFT / GRPO / 评测集零重叠 |
+
+三条护栏写进脚本而非文档：温度非 0 或本轮不是 200 题时**拒绝**与历史基线相减；
+`LABEL=` 必须显式指定（否则会覆盖冠军目录）；`BASELINE_SUMMARY=` 必须显式指定
+（自动挑选会挑到分数最高的目录，未必是要比的那个）。
+
+### 可比性：哪些能比、哪些不能
+
+**能比的是最终分数。** 评测集、环境、工具、系统提示词、温度、步数上限全部冻结，
+每题 1 次确定性 rollout ⇒ 同一张考卷。
+
+**不能比的是单步改动的归因。** 上游 60.5% → 62.0% 与本项目 62.0% → 64.0% 之间跨了
+**SFT 池、GRPO 池、奖励版本**多个变量，因此不能说「我们的 GRPO 比作者强 2 个点」。
+本项目的归因链在内部闭环：每个阶段只动一个变量，且始终在同一 reward 口径下评测。
+
+| 模型 | SFT 池 | GRPO 池 | Reward | Strict success |
+|---|---|---|---|---:|
+| Qwen3.5-2B 未训练 | — | — | v3 | 0.0% |
+| **上游** LoRA SFT | 1,192 | — | v3 | 60.5% |
+| **上游** GRPO step 100 | 1,192 | 1,000 | v3 | 62.0% |
+| 本项目 M5-B（三阶段课程，loss=tool-call-only） | 1,252 | — | v3+v4 | 62.0% |
+| **本项目 M10-R v2（最好 SFT）** | 1,210 | — | v4 | **63.5%** |
+| **本项目 M12（SFT + GRPO）** | 1,210 | 223 中等 | v4 | **64.0%** |
+| Qwen3.8-27B（参考，非本项目产出） | — | — | v3 | 73.0% |
+
+端到端净增 **+2.0pt / +4 题**（62.0% → 64.0%），但如上所述这不是单变量结论。
+**真正可归因的增量只有 M12 的逐题「1 进 0 出」**，见下一节。
+
+### 测试历程
+
+12 个阶段（M1 可解性审计 → M12 中等题 GRPO）逐阶段的「做了什么 / 结果 / 落点」见
+下方「12 个阶段做了什么」，完整归因与判据见[项目历史 §2 时间线](docs/project-history.md)。
+其中 **8 个阶段是负结果**（M6 零增益、M6-R 熔断、M7 Gate 3 未过、M8 靶点被离线解剖否决、
+M9 方向否决、M10-R v3 退化、M10-H 难题池空转、M11 查询 A/B 5 换 5），这些比成绩本身更有信息量。
+
+---
+
 ## 实验结果
 
 所有结果都在 **Final-200 Clean** 上测：200 道留出任务、每题 1 次确定性 rollout
@@ -220,6 +347,34 @@ M12 的做法是**只换训练数据**：用两轮采样给候选池打难度标
 **全错组被彻底清零**，这是「换池子」生效的直接证据。残留的 0.25 全部是「全对组」——
 中等题在训练中会退化成简单题，这是该路线的天然上限。
 
+### 训练奖励确实在涨，但涨的是「拟合」不是「能力」
+
+这是本项目最容易被误读的地方，所以单独列出来。训练过程中奖励指标**大幅上升**：
+
+| 指标 | step 25 | step 50 | 变化 |
+|---|---:|---:|---:|
+| `reward/shaped_mean`（= `critic/score/mean`） | 0.177 | **0.356** | **+101%** |
+| `reward/purchase_success_rate`（训练集） | 0.500 | **0.563** | +12.5% 相对 |
+| `reward/strict_mean` | 0.500 | 0.563 | +12.5% 相对 |
+| val mean@1（49 题留出集） | 0.4477 | **0.4972** | +11.1% 相对 |
+| **Final-200（200 题考卷）** | — | **127 → 128** | **+0.8% 相对** |
+
+**三级衰减，每级掉一个数量级**：训练奖励 +101% → 留出 val +11% → 真实考卷 +0.8%。
+
+为什么会这样，逐级解释：
+
+1. **`shaped_mean` 翻倍，主要不是因为「做对了更多题」**，而是因为 **−0.85 的全错组消失了**。
+   奖励表里一次错误购买的惩罚是 −0.85，全错组从 37%–75% 清零，均值自然被抬高。
+   这是「结构变化」不是「能力增长」。
+2. **训练集购买成功率 0.5 → 0.563（+6.3pp）是真实的能力提升**，但它只发生在
+   **223 道中等题**这个分布上。
+3. **迁移到 Final-200 只剩 +1 题**。这 223 道题是「用当时的模型打标筛出来的」，
+   模型在这些题上的进步，有相当一部分是「把已经被标注为可学的题学会了」，
+   不等于在没见过的题上更强。
+
+⇒ **奖励是训练信号，不是能力度量。** 这就是为什么本项目所有结论只认 Final-200，
+不认训练奖励、也不认 val（M11 探针的 val 涨了 +12.3%，Final-200 却是 0 进 1 出）。
+
 ### 试过但没走通的路（同样是资产）
 
 | 方向 | 结果 |
@@ -242,7 +397,7 @@ M12 的做法是**只换训练数据**：用两轮采样给候选池打难度标
 | **M1** 可解性审计 | 三层审计（有解性 / 检索可达性 / 评分可评性），23,421 条语料 | 建立准入契约，200 题冻结 |
 | **M2–M4** 数据与奖励 | 补采、Reward v4、数据重建 | SFT 池成形，四池 task_id 零重叠 |
 | **M5** SFT 消融 | assistant vs tool-call-only loss | **62.0%**（tool-call-only 胜，选为 GRPO 起点） |
-| **M6 / M6-R** GRPO | 按作者配方 / 把 lr 提到 2e-5 | 62.0% 打平 / step 48 熔断 |
+| **M6 / M6-R** GRPO | lr 5e-6（上游为 1e-6）/ 提到 2e-5 | 62.0% 打平 / step 48 熔断 |
 | **M7** Reward v5 | `wrong_purchase` 由常数改 band | Gate 3 梯度份额 0.3% ≪ 5%，**未开训** |
 | **M8** 多候选核验 | 计划补 100 条多开轨迹 | 靶点被离线解剖否决，**未开训** |
 | **M9** 推理期强制探索 | 买前必须打开 k 个候选 | 同批 9 题 **7/9 → 0/9**，方向否决 |
@@ -363,11 +518,21 @@ bash scripts/baseline.sh
 
 ### 4. 训练并评估 SFT
 
+主路径是三阶段课程（A→B→C，每阶段 1 epoch，lr 1e-4→7e-5→5e-5）：
+
 ```bash
-bash scripts/sft.sh
-bash scripts/serve_model.sh outputs/models/sft-merged
+# 先只打印六条 train/merge 命令，不加载模型
+bash scripts/sft_curriculum.sh --dry-run
+
+# 正式训练
+bash scripts/sft_curriculum.sh
+
+bash scripts/serve_model.sh outputs/models/sft-curriculum/stage-c/merged
 bash scripts/evaluate.sh sft
 ```
+
+`scripts/sft.sh` 是单阶段入口（`data/sft/` 1,000 条、3 epoch、lr 1e-4），仅用于复现
+上游的历史基线 60.5%，不是主路径。
 
 完成评估后再次停止模型服务。
 
@@ -449,9 +614,9 @@ bash scripts/report_all.sh
 
 Checkpoint、Rollout 和日志统一写入 Git 忽略的 `outputs/`。
 
-## Reward v3 简介
+## Reward 设计（v3 → v4）
 
-Reward v3 是一个确定性的终局 Reward，不依赖另一个大模型进行主观判断：
+判定逻辑是一个确定性的终局 Reward，不依赖另一个大模型做主观判断：
 
 - 类别和预算是 Hard Gate；
 - 品牌、型号、核心功能、关键规格按照 `0.35 / 0.25 / 0.25 / 0.15` 加权；
@@ -463,7 +628,15 @@ Reward v3 是一个确定性的终局 Reward，不依赖另一个大模型进行
 
 ![Reward V3 decision rules](docs/images/reward-v3-decision-rules.png)
 
-完整公式、终止条件和证据要求见 [Reward v3 设计文档](docs/reward-v3.md)。
+**本项目对奖励做的改动只有两处，都不触碰上面这套判定：**
+
+| 版本 | 改动 | 对分数的影响 |
+|---|---|---|
+| v4（M3） | 重写预算解析器（中文数字 / 口语单位 / 万缩写 / 全角空白 / 价格语境门控），并新增两个纯信息层（soft 价格接近度、过程证据） | 无。hard gate 逐字节不变，信息层只写 `evidence` |
+| v5（M7） | `wrong_purchase` 由 −0.85 常数改为 `[−0.85, −0.66]` band | 无，且未启用（Gate 3 梯度份额 0.3% < 5%） |
+
+完整公式见 [Reward v3 设计文档](docs/reward-v3.md)，两处改动的逐条依据见
+[Reward v4 变更说明](docs/reward-v4.md) 与 [Reward v5 变更说明](docs/reward-v5.md)。
 
 ## 仓库结构
 
@@ -551,11 +724,29 @@ bash scripts/grpo.sh --logger swanlab
 **C = 0 说明「打开哪一个」是唯一决策点**——一旦打开对了，就不会买错。
 下一步应先离线归因这 38 题（只读已有轨迹，不需要显卡），再决定改数据还是改奖励。
 
-### 2. 扩池要按真实预算做
+### 2. 扩池可能有效，但它是「军备竞赛」
 
-中等题（4 条轨迹里对 1–3 条）只占候选池的 **14%–17%**，而打标 1,000 道题 2 轮需要
-**约 4 小时**。⇒ **要 200 道新的中等题，得打标 1,200 道**（4 小时）+ 训练 4.7 小时。
-任何「扩池」计划都应该按这个预算规划，而不是「抽 200 道就行」。
+**为什么可能有效（有机制依据，不是盲猜）**：M12 的 223 道题走 0.9 遍后，
+`all_equal_ratio` 停在 **0.25**，残留的全是「全对组」——中等题在训练中退化成了简单题。
+补充**新的**中等题可以把这个比例压回去，让更多算力产生有效梯度。这条逻辑是清楚的。
+
+**为什么可能无效**：新题的「中等」标签是用**当前冠军**打出来的。训练后模型变强，
+这批新题同样会退化。⇒ 扩池不是一次性解决，而是**每轮都要重新打标**，
+成本随轮次递增。
+
+**真实预算**：中等题只占候选池 **14%–17%**，打标 1,000 道题 2 轮需 **约 4 小时**。
+⇒ **200 道新中等题 = 打标 1,200 道（4 h）+ 训练 4.7 h ≈ 9 小时**。
+「抽 200 道就行」是不成立的。
+
+**上限在哪（这决定值不值得做）**：Final-200 里 128 道已对、72 道错，其中只有
+**38 道是老师能做对的**（可达），其余 34 道连 `deepseek-v4-flash` 也做不对。
+⇒ **扩池的现实目标不是 65%，而是逼近 128 + 38 = 166/200 = 83% 这个可达上界**
+（还要扣掉评测集里约 20 道无解题，真实上限更低）。
+
+**我的判断**：扩池是唯一有机制依据的继续方向，但它是一场军备竞赛——每 200 道中等题
+花约 9 小时，换来的是「有效梯度窗口延长一轮」，不是永久提升。**如果要做，应该先做
+下面第 1 条（38 题归因），确认那 38 题缺的是「训练数据覆盖」还是「2B 的能力上限」**，
+再决定要不要投入扩池。
 
 ### 3. 评测集的信噪比才是天花板
 
@@ -570,19 +761,15 @@ bash scripts/grpo.sh --logger swanlab
 - **更细粒度的信用分配**：终局奖励稀疏，关键中间步骤（「打开第几个候选」）拿不到信号。
 - **混合 Teacher**：单一教师的行为覆盖有限，多教师混合可以扩大行为分布。
 
-## Star History
+## 上游项目与致谢
 
-<a href="https://www.star-history.com/?repos=YYHDBL%2Fshopping-grpo-longhorizon&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=YYHDBL/shopping-grpo-longhorizon&type=date&theme=dark&legend=top-left&sealed_token=wgQ1K2TiIB2luvZFJ54oMEhME-cxYmFv_wNoNXnT7lMZHsuQUy7NThQAG2VwpEeiUBoRxd09ASiB60cvvBaEvqVqyv49wYKZSF2H_Jft3Iq1ZZ0c5Sk2SQQejxHxMQwayMTRroOh5JhcWgXk6w8HHwjP6UgTquINRr40c7XysMi_j2BksVwqOWSIz8Ny" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=YYHDBL/shopping-grpo-longhorizon&type=date&legend=top-left&sealed_token=wgQ1K2TiIB2luvZFJ54oMEhME-cxYmFv_wNoNXnT7lMZHsuQUy7NThQAG2VwpEeiUBoRxd09ASiB60cvvBaEvqVqyv49wYKZSF2H_Jft3Iq1ZZ0c5Sk2SQQejxHxMQwayMTRroOh5JhcWgXk6w8HHwjP6UgTquINRr40c7XysMi_j2BksVwqOWSIz8Ny" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=YYHDBL/shopping-grpo-longhorizon&type=date&legend=top-left&sealed_token=wgQ1K2TiIB2luvZFJ54oMEhME-cxYmFv_wNoNXnT7lMZHsuQUy7NThQAG2VwpEeiUBoRxd09ASiB60cvvBaEvqVqyv49wYKZSF2H_Jft3Iq1ZZ0c5Sk2SQQejxHxMQwayMTRroOh5JhcWgXk6w8HHwjP6UgTquINRr40c7XysMi_j2BksVwqOWSIz8Ny" />
- </picture>
-</a>
+本仓库 fork 自 [YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon)。
+上游提供了本项目的基础设施：ShopSimulator 环境封装、工具 schema、数据协议、Reward v3、
+Final-200 Clean 评测集与 veRL 训练脚手架。**本仓库的改动集中在后训练配方与数据池**
+（SFT 数据重构、GRPO 中等题池、评测脚本与逐题归因工具），不改动环境、奖励与评测口径，
+因此两边的分数可以直接比较。
 
-## 引用与致谢
-
-本项目建立在
+上游本身建立在
 [ShopSimulator 论文](https://arxiv.org/pdf/2601.18225)及其开源环境、
 [veRL](https://github.com/verl-project/verl) 和
 [Qwen](https://github.com/QwenLM/Qwen3) 之上。
@@ -592,12 +779,20 @@ bash scripts/grpo.sh --logger swanlab
 以及
 [EComAgentBench: Benchmarking Shopping Agents on Long-Horizon Tasks with Distributed Hidden Intent](https://arxiv.org/pdf/2606.17698)。
 
-仓库结构和教程呈现参考了
+仓库结构参考了
 [qiqihezh/agentic-grpo-longhorizon](https://github.com/qiqihezh/agentic-grpo-longhorizon)。
-感谢 [OpenCode Go 套餐](https://dev.opencode.ai/go) 对开发工作的支持。
+感谢 [OpenCode Go 套餐](https://dev.opencode.ai/go) 对上游开发工作的支持。
 
 ### Contributors
 
+**上游作者**
+
 <a href="https://github.com/Guochangwei917">
   <img src="https://github.com/Guochangwei917.png?size=80" width="80px;" alt="Guochangwei917"/>
+</a>
+
+**本仓库维护**
+
+<a href="https://github.com/Jaxuu">
+  <img src="https://github.com/Jaxuu.png?size=80" width="80px;" alt="Jaxuu"/>
 </a>
