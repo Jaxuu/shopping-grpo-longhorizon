@@ -36,6 +36,8 @@ solves is a strict superset of the set SFT solves
 > per-task evaluation. See [project history](docs/project-history.md) for results and
 > negative findings. Upstream attribution is at the end of this file.
 
+> **Reading and evidence note:** see the [Chinese pipeline walkthrough](docs/project-walkthrough.zh-CN.md) for implementation and contribution boundaries. The current runtime has been restored to Reward v4. Later scores below are historical records, not rerun here; their runtime versions require the original logs.
+
 ![Shopping GRPO project overview](docs/images/project-overview-pipeline.png)
 
 ## What is ShopSimulator?
@@ -203,15 +205,13 @@ this fork did not change them.**
 
 ### What changed
 
-**1. Reward: v3 → v4 (M3); v5 written but never enabled (M7)**
+**1. Reward: v3 → v4 (M3)**
 
 | Version | Change | Effect on Final-200 score |
 |---|---|---|
-| **v4** | ① Budget parser rewritten: Chinese numerals (including elided forms like 两千五), colloquial units (块/块钱/圆), unprefixed ranges, 万 abbreviations, full-width and `\xa0` normalisation; price-context gating rejects false hits such as `SPF50+`, `6g`, `60厘米`. ② Two **information-only layers**: soft price proximity and process evidence `shopping-process-evidence-v1` | **None.** Hard-gate semantics are byte-identical; both layers only write to `evidence` and never enter the terminal decision. Budget parse rate on the benchmark is 93.5% |
-| **v5** | `wrong_purchase` from a constant −0.85 to the band `[−0.85, −0.66]`, varying with `match_score` × budget proximity | **None, and never used for a final model**: Gate 3 measured a gradient share of 0.3% against a 5% threshold, so M7 was closed |
+| **v4** | ① Budget parser rewritten: Chinese numerals (including elided forms like 两千五), colloquial units (块/块钱/圆), unprefixed ranges, 万 abbreviations, full-width and `\xa0` normalisation; price-context gating rejects false hits such as `SPF50+`, `6g`, `60厘米`. ② Two **information-only layers**: soft price proximity and process evidence `shopping-process-evidence-v1` | The comparison rule is unchanged, but parsed budget bounds may change and require replay checks. Diagnostic fields do not enter the reward. Non-empty budget parsing is 187/200 (93.5%), not parsing accuracy |
 
-In one line: **we changed whether budgets parse correctly and whether the training signal is
-fine-grained enough — not what counts as a correct purchase.**
+Parser changes can affect budget inputs; informational evidence does not itself provide training reward.
 
 **2. SFT: larger pool, new supervision scope, extra final leg for the champion**
 
@@ -234,15 +234,15 @@ below is the real value in both places:
 
 | Parameter | Upstream | Used here | Reason |
 |---|---|---|---|
-| Training pool `data/grpo/train.jsonl` | **1,000 tasks** | 906 after the M4 rebuild → M12 **223 medium-difficulty tasks** (1–3 successes out of 4 rollouts) | all-correct / all-wrong groups have zero within-group advantage and only burn compute |
-| `train_batch_size` | 2 | **4** | both feed 8 sequences per update (4×4÷2 = 2×4÷1); equivalent learning, but 4 is faster (189 vs 227 s/update) |
+| Training pool `data/grpo/train.jsonl` | **1,000 tasks** | 906 after the M4 rebuild → M12 **223 medium-difficulty tasks** (mixed success/failure in two actual labeling rounds) | constant-reward groups have zero advantage; all-wrong groups need not have constant rewards |
+| `train_batch_size` | 2 | **4** | with mini-batch 2 and n=4, each mini-batch has 8 trajectories; batch 4 produces two updates, so these settings are not training-equivalent |
 | `max_response_length` | 20480 | **16384** | measured `response_length/max = 7500`, never saturated; saves ~25% memory |
-| `optim.lr` | **1e-6** | **1e-5** | 1e-6 does not move the model (M6 was a zero result); at 1e-5 `ppo_kl` rises monotonically from 0.0038 to 0.0055 |
+| `optim.lr` | **1e-6** | **1e-5** | M6 used 5e-6 and M12 used 1e-5; their differences cannot be attributed to learning rate alone |
 | `clip_ratio_high` | 0.20 | **0.28** | asymmetric with `clip_ratio_low`, loosening positive updates |
 | `calculate_entropy` | true (logging only, not in the loss) | **false** | under bypass it both OOMs and never emits the metric |
-| `total_training_steps` | 500 | **50** | 223 tasks × 50 steps × batch 4 = 200 prompt-passes ≈ 0.9 epochs |
+| `total_training_steps` | 500 | **50** | 50 steps × batch 4 = 200 training prompt-group occurrences, excluding discarded generations |
 | `save_freq` / `test_freq` | 50 / 50 | **25 / 25** | 50 steps only yields two checkpoints; 25-step granularity makes the mid-run validation visible |
-| `rollout.n` (group size) | 4 | **4 (unchanged)** | changing it changes the algorithm itself |
+| `rollout.n` (group size) | 4 | **4 (unchanged)** | changes the group estimator and sampling cost |
 
 **4. Evaluation harness: upstream has only a single-process entry point**
 
@@ -274,12 +274,12 @@ closed-loop: each stage moves one variable under the same reward.
 | **Upstream** LoRA SFT | 1,192 | — | v3 | 60.5% |
 | **Upstream** GRPO step 100 | 1,192 | 1,000 | v3 | 62.0% |
 | This fork M5-B (three-stage curriculum, loss=tool-call-only) | 1,252 | — | v3+v4 | 62.0% |
-| **This fork M10-R v2 (best SFT)** | 1,210 | — | v4 | **63.5%** |
-| **This fork M12 (SFT + GRPO)** | 1,210 | 223 medium | v4 | **64.0%** |
+| **This fork M10-R v2 (best SFT)** | 1,210 | — | historical runtime unverified | **63.5%** |
+| **This fork M12 (SFT + GRPO)** | 1,210 | 223 medium | historical runtime unverified | **64.0%** |
 | Qwen3.8-27B (reference, not produced here) | — | — | v3 | 73.0% |
 
 End-to-end gain is **+2.0pp / +4 tasks** (62.0% → 64.0%), which as noted is not a
-single-variable result. **The only attributable increment is M12's per-task 1-in / 0-out**,
+single-variable result. **M12 records a per-task 1-in / 0-out; this does not isolate a causal effect of filtering**,
 described in the next section.
 
 ### Test history
@@ -327,34 +327,21 @@ twelve stages. The three earlier GRPO attempts either tied (M6), crashed at step
 48 (M6-R), or lost one task (M11 probe, whose 126 successes were a strict
 *subset* of the baseline's 127 — the opposite direction).
 
-> **Honest caveat**: +1 task sits inside binomial noise (σ ≈ 6.9 tasks). At the
-> aggregate level 64.0% and 63.5% are indistinguishable. The defensible claim is
-> "unique successes went from 0 to 1", not "success rate improved by 0.5pp".
-> Statistical separation would require ≥134 tasks (+7).
+> **Evidence limit:** the historical result is 128/200 versus 127/200, with one discordant task and no multi-seed verification. A two-sided exact McNemar test gives p=1. Zero observed regressions does not establish a statistically significant gain.
 
-### Where the 0.5pp came from
+### Medium-difficulty filtering and training signal
 
-The first two GRPO rounds spun in place for a measurable reason: the training log
-showed `group/all_equal_ratio` **0.25–0.50** and `no_purchase_success_ratio`
-**0.375–0.75** — a quarter to a half of all groups had four identical rewards
-(all correct or all wrong), so the within-group advantage was identically zero.
-Those prompts burned compute without producing a gradient direction.
+Constant-reward groups have zero relative advantage; all-wrong groups need not have constant rewards. Dynamic sampling filters after generation, while offline filtering aims to reduce wasted generation.
 
-M12 changed **only the training data**: two sampling rounds labeled each
-candidate task by "how many of 4 rollouts succeed", and only the
-**medium-difficulty** ones (1–3 of 4, 223 tasks) were kept. Every other
-hyperparameter stayed fixed.
+M12 used two actual labeling rounds at temperature 0.7 and selected 223 mixed-success tasks. The labeling model was `grpo-m11-merged`, while training started from SFT v2. Training length also changed from the 25-step probe to 50 steps, so this is not a strict single-variable comparison.
 
-| Metric | Before | After |
+| Metric | Earlier record | M12 step 50 |
 |---|---:|---:|
-| `no_purchase_success_ratio` (all-wrong groups) | 0.375–0.75 | **0.00** |
-| `all_equal_ratio` (zero-gradient groups) | 0.25–0.50 | 0.25 |
+| `no_purchase_success_ratio` | 0.375–0.75 | **0.00** |
+| `all_equal_ratio` | 0.25–0.50 | 0.25 |
 | Final-200 | 127 | **128** |
 
-**All-wrong groups were eliminated entirely** — direct evidence that the pool
-swap worked. The residual 0.25 are all *all-correct* groups: medium-difficulty
-tasks degrade into easy ones during training. That is the structural ceiling of
-this route.
+The step-25 no-success ratio was 0.083. Zero therefore describes the recorded late sampling point, not the whole run, and zero-variance groups remained. See the [walkthrough](docs/project-walkthrough.zh-CN.md) for definitions and limitations.
 
 ### Training reward does rise — but that is fitting, not capability
 
@@ -397,7 +384,6 @@ not on val (the M11 probe gained +12.3% on val while losing one task on Final-20
 | Teach paging (144 synthetic demonstrations) | 63.5%, but only 7 of 21 paging tasks actually paged; per-turn rationales dropped it to 61.5% |
 | Rewrite search queries via system prompt | 127/200, net 0 (5 gained, 5 lost) |
 | Hard-task pool (201 tasks with gold beyond rank 20) | 63.5%, only 2 tasks changed per-task ⇒ no signal |
-| Reward v5 (`wrong_purchase` as a band) | Gate 3 gradient share 0.3% ≪ 5% threshold, never trained |
 
 Full attribution and interpretation rules: [`docs/project-history.md`](docs/project-history.md)
 and [`docs/lessons-learned.md`](docs/lessons-learned.md). Machine-readable
@@ -593,16 +579,15 @@ language model for subjective judgment:
 
 ![Reward V3 decision rules](docs/images/reward-v3-decision-rules.png)
 
-**This fork made exactly two changes to the reward, neither touching the decision above:**
+**This fork extended budget parsing and added diagnostic evidence:**
 
 | Version | Change | Effect on scores |
 |---|---|---|
-| v4 (M3) | budget parser rewritten (Chinese numerals, colloquial units, 万 abbreviations, full-width whitespace, price-context gating) plus two information-only layers (soft price proximity, process evidence) | none — hard gates are byte-identical, the new layers only write to `evidence` |
-| v5 (M7) | `wrong_purchase` moved from a constant −0.85 to the `[−0.85, −0.66]` band | none, and never enabled (Gate 3 gradient share 0.3% < 5%) |
+| v4 (M3) | budget parser rewritten (Chinese numerals, colloquial units, 万 abbreviations, full-width whitespace, price-context gating) plus two information-only layers (soft price proximity, process evidence) | parsed bounds may change; diagnostic evidence does not enter the reward |
 
 The complete formula, termination rules and evidence requirements are in the
 [Reward v3 design guide](docs/reward-v3.md); the rationale for each change is in
-[Reward v4](docs/reward-v4.md) and [Reward v5](docs/reward-v5.md).
+[Reward v4](docs/reward-v4.md).
 
 ## Repository map
 

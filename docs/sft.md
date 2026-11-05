@@ -7,6 +7,8 @@ ShopSimulator's action protocol. Supervised fine-tuning teaches the basic
 policy: issue legal tool calls, use observations as evidence, select product
 variants and terminate.
 
+> 这是上游课程配方说明，不是最终 1,210 行数据与热启动模型的完整复现清单。后续数据与监督口径见[项目讲解](project-walkthrough.zh-CN.md)。
+
 ## Inputs
 
 - Base model: `Qwen/Qwen3.5-2B`

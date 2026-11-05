@@ -1,5 +1,7 @@
 # 项目历程与问题台账
 
+> 核对说明：本文保留历史记录，不能把其中的推断视为已验证事实。两轮打标、训练量变化、统计解释和历史奖励版本等更正见[项目讲解](project-walkthrough.zh-CN.md)。当前运行时为 Reward v4，历史运行版本需原始日志确认。
+
 > 用途：这是**可入库、可长期保存**的项目主记录，供写项目介绍、复盘与归档引用。
 > 它只收录结论与证据指针，细节留在各阶段的专门文档里（见 §1 记录地图）。
 > 最后更新：2026-10-29（M12 收尾：GRPO 首次出现非零提升，但幅度不足，中等题路线关闭）。
@@ -28,10 +30,10 @@
 | **主记录** | `docs/project-history.md`（本文件） | 时间线、问题台账、负结果、判据体系 | ✅ |
 | **经验台账** | `docs/lessons-learned.md` | **已关闭的路、六条判读铁律、硬约束、工程坑**。改计划前必读 | ✅ |
 | 能力审计 | `docs/capability-coverage-audit.md` | 能力—数据—结果三方对照（评测考什么 / 数据教没教 / 结果差在哪） | ✅ |
-| 阶段文档 | `docs/reward-v3.md` / `reward-v4.md` / `reward-v5.md` | 奖励口径的逐版规格与变更理由 | ✅ |
+| 阶段文档 | `docs/reward-v3.md` / `reward-v4.md` | 奖励口径的逐版规格与变更理由 | ✅ |
 | 阶段文档 | `docs/data-collection.md` / `sft.md` / `grpo.md` / `evaluation*.md` | 各阶段的流程与协议 | ✅ |
 | 实验产物 | `experiments/{baseline,sft,sft-m5,grpo}/`、`comparison.md` | 配置 + 摘要 + 对照表（小体积） | ✅ |
-| 审计产物 | `audit/*.jsonl|json`、`audit/reward-v4-hashes.txt`、`reward-v5-hashes.txt` | 准入判定、冻结哈希（机器可读） | ✅ |
+| 审计产物 | `audit/*.jsonl|json`、`audit/reward-v4-hashes.txt` | 准入判定、冻结哈希（机器可读） | ✅ |
 | **执行计划** | `plans/roadmap-v2.md` | M10 的 6 Phase 计划；**M12 收尾后没有进行中的计划** | ❌ gitignored |
 | **工作记录** | `plans/`（其余 21 份） | 逐阶段 runbook、证据计划、决策、交接。**均已降级为历史证据**（含 `m11-grpo-medium-runbook.md`，M12 的执行手册） | ❌ gitignored |
 | 会话记忆 | `.workbuddy-ai/memory/` | 每日工作日志 + 长期约定 | ❌ gitignored |
@@ -53,7 +55,6 @@
 | **M5** SFT 消融 | 两种 loss scope 重训（A=assistant / B=tool-call-only） | **M5-B 62.0%** 全指标最优 ⇒ 选为 GRPO 起点 | `experiments/sft-m5/` |
 | **M6** GRPO 第一轮 | 按作者配方（lr 5e-6、batch 4、n 4、clip .28、50 步） | **62.0%**，与 M5-B 打平（123/124 题相同）⇒ 零结果 | `plans/m6-grpo-runbook.md` |
 | **M6-R** GRPO 第二轮 | 唯一变量 lr 5e-6→2e-5 | val@25 **0.3425** < 起点 0.3599；step 48 熔断 ⇒ 负结果，不采纳 | `outputs/archive/m6r-crash48/` |
-| **M7** Reward v5 | `wrong_purchase` 由常数 −0.85 改为 band `[−0.85, −0.66]` | **Gate 3 fail（梯度份额 0.3%/0.1%/0.1% vs 门槛 5%），未开训 ⇒ 关闭**；L2 判定不变性重放通过 | `docs/reward-v5.md`、`plans/m7-closing.md` |
 | **M8** 多候选核验 | 计划补 100 条「多开商品」gold 轨迹 | **靶点被离线解剖否决，未开训**；转为 3 个纯 CPU 诊断脚本 | `plans/m8-data-plan.md` |
 | **M9** 推理期强制探索 | 加守卫「买前必须开 k 个候选」，其余全不动 | k=5 作废（需 42 步 > 冻结 35）；k=3 同批 9 题 **7/9 → 0/9**（p≈0.016）⇒ **方向否决** | `plans/m9-exploration-probe.md` |
 | **M10** 数据重构（**当前**） | **回到 SFT**：补「翻页 / 候选筛选后回头买 / 超预算排除」三种场景的正确示范 | **进行中**，6 Phase + 5 闸门 | `plans/roadmap-v2.md` |
@@ -114,9 +115,6 @@
 | B3 | 全池 57.2% 的组零方差 | 全成功 44.4% + 全失败 28.7% | `dynamic_sampling` 本身就是过滤器；静态过滤训练集只省 rollout，不改梯度 | `plans/m6-grpo-runbook.md` |
 | B4 | 加 `rollout.n` 看似能扩可用池 | n=8 可用组 45.4%（vs 40.4%），但吞吐 **51.5 vs 97.8** 组/1000 rollout | **不加 n**（亏 1.9×）；留给 M8 的「n=8 + batch=8」组合臂 | `scripts/analyze_group_size_sweep.py` |
 | B5 | turn-level 过程奖励看似是缺口 | 步数中位 **8 vs 8**、长尾 0.0% vs 3.9%、三缺陷提升比≈1 | **不做**：可及空间≈0 | `scripts/analyze_eval_failures.py` |
-| B6 | `wrong_purchase` 23 题（11.5%）零梯度 | 奖励恒 −0.85，组内 4 条全等 ⇒ `drop_reason="constant_reward"` | M7 靶点：档位内 soft 排序（v5） | `docs/reward-v5.md` |
-| B7 | v5 的 cap 取 −0.45 会破坏档位序 | 它高于 `max_steps(−0.50)`、`repeat_loop(−0.65)` | cap 收到 **−0.66**，并写成断言 | `docs/reward-v5.md §1` |
-| B8 | v5 的梯度份额可能过小 | `norm_adv_by_std_in_grpo: false` ⇒ `A = r − mean`，带宽即梯度量级 | 新增 **Gate 3**（梯度份额），预登记阈值 10%/5% | `scripts/analyze_v5_gradient_share.py` |
 
 ### C. 观测与判读（最容易误判的一类）
 
@@ -127,8 +125,8 @@
 | C3 | 「打开 <2 个商品」被当成缺陷 | 覆盖 **99%** 的题，连 gold 成功题也一样 | 不是缺陷，是行为常态；缺陷必须有区分度 |
 | C4 | 用未激活维度算失分 | 未激活维度恒为 0 | 只能用 `evidence.preference_scoring.dimensions` 里 `active=True` 的 |
 | C5 | 过程形状用均值判读 | 3 条离群轨迹（15/20/35 步）把均值拉偏 | 改用中位数 + 长尾占比 |
-| C6 | 「题间有 14 个取值」被当成 v5 的收益 | GRPO 的 advantage 是**组内**算的 | 题间分辨率不产生梯度；只有 Gate 2（组内方差）算 |
-| C7 | 改奖励后 `reward/mean@1` 会机械上移 | 同一策略、同一 checkpoint，失败样本从 −0.85 变 −0.66..−0.85 | 主指标改用 `purchase_success`；用它选点还有偏置（好策略加成更小） |
+| C6 | 把题间奖励分辨率当成训练收益 | GRPO 的 advantage 是**组内**算的 | 题间分辨率不产生梯度；只有 Gate 2（组内方差）算 |
+| C7 | 改奖励后均值可能机械上移 | 同一策略在不同数值标尺下均值不可直接比较 | 同时报告固定口径的 strict / purchase success |
 | C8 | val 指标键前缀是 `val-core/` / `val-aux/`，不是 `val/` | 用 `grep 'val/'` 查不到会误判「验证没跑」 | 记住前缀；`val_before_train` 的初始验证不进 diagnostics |
 | C9 | 数步数用 `grep -c '^step:'` 会错 | 跳过行也打 `step:`，且 tqdm 的 `\r` 让 `^` 漏匹配 | 权威口径 `grep -ac optimizer_step <diagnostics.jsonl>` |
 | C10 | `timing_s/` 混有 token 长度键 | 未排除时出现 4729% 的荒谬占比 | 用 `NON_DURATION_SUFFIXES` 排除 |
@@ -143,7 +141,7 @@
 |---|---|---|---|
 | D1 | `calculate_entropy=true` 既无效又必然 OOM | `bypass_mode` 跳过 `_compute_old_log_prob`（熵的唯一来源）；backward 多留 `24576×248320×2 B = 12.47 GiB` | preflight 直接拒绝；启动必须带 `calculate_entropy=false`；chunking 救不了（只切前向） |
 | D2 | `data/environment.json` 的 `runtime_files_sha256` 过期 | preflight `SystemExit` | 改 `reward.py` 后**最后一步**重算哈希，且按 LF 归一化算（Windows CRLF 会算错） |
-| D3 | `audit/reward-v4-hashes.txt` 是 CRLF 原始字节口径 | 未改动文件也对不上 | v5 那份改用 LF 并在文件头写明差异 |
+| D3 | 历史哈希文件与当前文件口径可能不同 | Windows CRLF 与 Linux LF 的哈希不同 | 本次维护统一使用 LF 归一化，并更新运行时哈希 |
 | D4 | 版本门槛分散在 10 处，漏改静默失败 | 漏 `evaluation/metrics.py` ⇒ `_strict_success` 恒 False | 逐处清单 + `adapter/tools.py` 复用常量消除双份字面量 |
 | D5 | 欠费/断连后误以为进程被杀 | `tmux` 会话存活、诊断文件仍在追加 | 先查 `tmux ls` + 文件 mtime + `nvidia-smi`，再决定是否重启 |
 | D6 | 训练中途重启 env 服务会打断在飞轨迹 | — | env 健康 ≠ 训练健康，先看 timing 分解 |
@@ -156,15 +154,7 @@
 |---|---|---|---|
 | v3 | 基线：hard gate（category + budget，严格 `actual <= upper`）+ 维度加权 | — | `docs/reward-v3.md` |
 | v4 | 解析覆盖扩展（parser v4）+ soft 价格接近度 + 过程证据 + 版本同步 | **逐字节不变** | `docs/reward-v4.md` |
-| v5 | `wrong_purchase` 由常数 −0.85 → `min(−0.66, −0.85 + 0.20 × ms × prox)` | **逐字节不变**（`reward_type`/hard gate/`purchase_success`/`reward_valid`） | `docs/reward-v5.md` |
 
-**v5 的设计约束**（已写成断言，见 `tests/test_reward_v5.py`）：
-
-- `driver = 0` 时与 v4 完全一致（最坏情形不变）；
-- `cap(−0.66) < repeat_loop(−0.65) < max_steps(−0.50) < early_abstain(−0.35)`：档位序保持，
-  `wrong_purchase` 仍是最差档（否则等于恢复恐慌性购买）；
-- 轴用 `ms × prox` 而非纯 `ms`：23 题里 20 题是超预算失败，且 `ms` 与超支幅度
-  Spearman **+0.42**（越像正确答案的商品越贵）。
 
 ---
 
@@ -595,12 +585,12 @@ mini_batch 2、clip 0.28、50 步、`save_freq=25 test_freq=25`。50 步 × batc
 | 用途 | 用什么 | 不要用什么 |
 |---|---|---|
 | 收益判定 | val 曲线（49 题，±1 题 = ±0.0204）+ 最终 Final-200 | 训练侧 score（batch 噪声 ±0.5） |
-| 主指标（v5 之后） | `purchase_success` 率（分类量，与奖励数值无关） | `reward/mean@1`（改奖励会机械上移） |
+| 主指标 | `purchase_success` 率（分类量，与奖励数值无关） | `reward/mean@1`（改奖励会机械上移） |
 | 步长 | `pg_clipfrac`（≥1.1e-3 才算动了） | `ppo_kl`（噪声地板） |
 | 信号吞吐 | 每步 skip 次数、`effective_ratio`、`kept_group_count` | — |
 | 发散/熔断 | `consecutive_skips`、`all_equal_ratio` | — |
 | 选点 | `scripts/select_grpo_checkpoint.py`（只用 val） | Final-200（那是考卷） |
-| 改动安全性 | 数据重放（`scripts/verify_reward_v5.py`）+ preflight | 只靠单测 |
+| 改动安全性 | 终局分类重放 + preflight | 只靠单测 |
 | 值不值得开跑 | Gate 1 指标键 / Gate 2 组内方差 / Gate 3 梯度份额 | 直觉或预期收益 |
 
 ---
@@ -616,7 +606,6 @@ mini_batch 2、clip 0.28、50 步、`save_freq=25 test_freq=25`。50 步 × batc
 - **零梯度失败占全部失败的 34.2%**（26/76）。
 - `wrong_purchase` 内部 `match_score`：0 → 0.812，**14 个取值**，均值 **0.415**；
   其中 20/23 是超预算失败，超支幅度 1.02×–3.18×，13/20 ≤1.35×（近失簇）。
-- v5 之后这 23 题从 **1 个取值**变为 **12 个取值**，带内跨度 0.19。
 
 **M6 之后新增的离线数字（2026-10-19，全部纯 CPU，未开训）**
 
@@ -718,8 +707,7 @@ mini_batch 2、clip 0.28、50 步、`save_freq=25 test_freq=25`。50 步 × batc
 
 - **M1–M6**：数据审计 / 补采 / Reward v4 / 数据重建 / SFT / GRPO。
 - **M6-R**：M6 的 lr 复跑臂（负结果）。
-- **M7**：⚠️ 在早期 `plans/task.md` 里指「三模型统一评测 + 配对比较」；自 2026-10-18
-  起被复用为「**Reward v5 的 GRPO 臂**」的代号。引用时请注明是哪个含义。
+- **M7**：离线奖励信号诊断，未启动独立训练。
 - **M5-A / M5-B**：两种 SFT loss scope（assistant / tool-call-only），B 为 GRPO 起点。
 - **M8**：曾计划「补采 100 条多开商品核验轨迹 → 混训 SFT」，**靶点被 §5.1 的离线解剖否决**
   （规格只占失败 24%），从未产生训练产物。**该代号已关闭**；"M8 诊断脚本"

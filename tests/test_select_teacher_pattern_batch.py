@@ -136,7 +136,7 @@ def raw_trajectory(
             "done": True,
             "over": True,
             "reward_detail": {
-                "reward_version": "shopsimulator-reward-v5",
+                "reward_version": "shopsimulator-reward-v4",
                 "reward_type": "gold_purchase" if gold else "wrong_purchase",
                 "reward_valid": True,
                 "purchase_success": gold,

@@ -23,6 +23,10 @@ src/shopping_grpo/training/grpo/
 bounded dynamic sampler to veRL 0.8.0. Setup fails rather than patching an
 unknown veRL version.
 
+> This guide includes historical settings. The current runtime is Reward v4;
+> later historical runs still require their original manifests for verification.
+> See the [pipeline walkthrough](project-walkthrough.zh-CN.md) for M12 and evidence limits.
+
 ## Inputs
 
 - Initial policy: `outputs/models/sft-b-curriculum/stage-c/merged` (the M5-B
@@ -73,7 +77,7 @@ Important defaults (see [`configs/grpo.yaml`](../configs/grpo.yaml)):
 | Save / validation frequency | 25 / 25 |
 | Clip ratio low / high | 0.20 / 0.28 |
 | KL reward / KL loss | disabled / disabled |
-| Policy entropy measurement | enabled (`entropy_coeff` is 0, so the value is logged but never enters the loss) |
+| Policy entropy measurement | disabled via `actor.calculate_entropy=false` override; YAML still says true and preflight rejects it |
 
 `train_batch_size` (4), `clip_ratio_high` (0.28), `max_response_length` (16384)
 and `rollout.enforce_eager` (true) are **command-line overrides**, not YAML values.
@@ -106,25 +110,10 @@ logs**, whether `calculate_entropy` is on or off — turning it on only pays the
 To actually get the entropy curve you must set `bypass_mode: false`, which is an
 algorithmic change, not a measurement one.
 
-That memory cost is why the YAML pairs it with
-`actor.fsdp_config.entropy_from_logits_with_chunking: true`, and why
-[`scripts/check_grpo_runtime.py`](../scripts/check_grpo_runtime.py) refuses to start
-when `calculate_entropy` is on without it:
-
-- entropy is computed from `softmax(logits, -1)`, which materialises two
-  `[tokens, vocab]` fp32 temporaries per micro-batch, and `calculate_entropy` forces
-  `inplace_backward = False` (`verl/workers/engine/fsdp/transformer_impl.py`), so one
-  more `[tokens, vocab]` stays resident until the backward pass ends. At
-  `vocab=248320` and `max_response_length=16384` that is ~23 GB of marginal peak on
-  top of the ~58.8 GB reserved by round 1 — past an 84 GB card.
-- `entropy_from_logits_with_chunking` splits the softmax into 2048-row chunks, which
-  bounds that peak at ~6 GB and makes it independent of trajectory length. It is a
-  row-wise softmax, so the numbers are identical.
-- The effective path is `actor.fsdp_config.*`, **not** `actor.*`:
-  `engine_workers.py` hands `actor_config.engine` to `FSDPEngine`, and
-  `FSDPActorConfig.__post_init__` only points `engine` at `fsdp_config` — the
-  same-named `actor.entropy_from_logits_with_chunking` field is never copied over,
-  so setting it there is a silent no-op.
+The current preflight rejects `calculate_entropy=true`. Earlier attempts to rescue
+it with chunking did not avoid the saved activation peak during backward. For
+the recorded runs, pass `actor_rollout_ref.actor.calculate_entropy=false`.
+Chunking the forward softmax alone is not evidence that backward memory fits.
 
 Two settings are load-bearing and must stay aligned:
 

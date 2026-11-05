@@ -15,6 +15,8 @@ Follow the guides in workflow order:
 5. [Final-200 Clean evaluation dataset](evaluation-dataset.md) defines the current
    curated benchmark and its update record.
 
-Reward specification, by version: [v3](reward-v3.md) (baseline contract) →
-[v4](reward-v4.md) (parser coverage + informational layers) →
-[v5](reward-v5.md) (current; `wrong_purchase` soft band).
+Reward specification: [v3](reward-v3.md) defines the original contract;
+[v4](reward-v4.md) adds parser coverage and informational layers and is the current runtime.
+
+For a Chinese walkthrough of the complete pipeline and contribution boundaries,
+read [项目链路与实现讲解](project-walkthrough.zh-CN.md).

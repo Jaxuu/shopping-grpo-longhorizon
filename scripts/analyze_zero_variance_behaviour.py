@@ -3,11 +3,8 @@
 
 为什么要有这个
 --------------
-M7 结案的核心证据是：116 个含 `wrong_purchase` 的多采样组里，**61.2% 在
-`match_score × proximity` 轴上方差恰为 0**。方差恰为 0 意味着 4 条轨迹的
-「买到的那个商品」完全相同 ⇒ 任何以最终商品属性为自变量的奖励函数在组内只能
-输出同一个数 ⇒ 换 scale / 换 cap / 换轴都无效（Gate 3 实测梯度份额 0.1%，
-门槛 5%）。
+相同终局奖励可能对应相同或不同的行为路径；需要对同题多条轨迹分别检查
+最终选择、工具动作和搜索证据，而不能只根据一个匹配分数推断行为相同。
 
 但「买的东西一样」**不等于**「过程一样」。两条路走到同一个错误终点，和两条
 完全相同的路走到同一个错误终点，对下一步的含义截然相反：
@@ -74,7 +71,7 @@ OPEN_TOOL = "open_product"
 SEARCH_TOOL = "search_products"
 OPTION_TOOL = "select_option"
 
-# 轴值比较容差：与 `analyze_wrong_purchase_variance.py` 的 Gate 2 口径一致。
+# 轴值比较容差：用于组内属性与预算接近度的数值比较。
 AXIS_TOLERANCE = 1e-9
 
 
@@ -127,7 +124,7 @@ def _finite(value: object, default: float = 0.0) -> float:
 
 
 def budget_proximity(required: object, actual: object) -> float:
-    """`min(1, required/actual)`；不可算时返回 1.0（中性）。与 v5 实现同口径。"""
+    """`min(1, required/actual)`；不可算时返回 1.0（中性）。仅作为离线诊断轴，不参与运行时奖励。"""
     if not isinstance(required, (int, float)) or not isinstance(actual, (int, float)):
         return 1.0
     if not math.isfinite(required) or not math.isfinite(actual) or actual <= 0:
@@ -436,7 +433,7 @@ def render_report(
         lines.append(f"| {label} | {meaning} | {count} | {_share(count, total)} |")
     lines.append("")
     lines.append(
-        f"对照：全 wrong 但**有**方差的组 {summary['nonzero_groups']} 个（v5 能救的那批，"
+        f"对照：全 wrong 但**有**方差的组 {summary['nonzero_groups']} 个（存在属性差异的组，"
         "不参与本节判定）。"
     )
     lines.append("")
